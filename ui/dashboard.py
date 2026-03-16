@@ -17,7 +17,7 @@ from storage.database import Database
 
 
 class SpiderDashboard(App[None]):
-    """Terminal dashboard that refreshes opportunities and allows core actions."""
+    """Terminal dashboard that centralizes monitoring and operational actions."""
 
     CSS = """
     Screen { layout: vertical; }
@@ -40,7 +40,7 @@ class SpiderDashboard(App[None]):
         self.agent = SpiderAgent()
         self.scheduler = None
         self.auto_scan_enabled = False
-        self.last_action = "Ready"
+        self.last_action = "Ready (dashboard-first mode)"
         self.last_scan_result = "Not run"
 
     def compose(self) -> ComposeResult:
@@ -144,7 +144,7 @@ class SpiderDashboard(App[None]):
         status_table.add_row("Last scan", self.last_scan_result)
         status_table.add_row("Local time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-        log_table = Table(title="Control Center", expand=True)
+        log_table = Table(title="Control Center (Single-UI Ops)", expand=True)
         log_table.add_column("Action")
         log_table.add_column("Status")
         log_table.add_row("Hotkeys", "[S] Scan [A] Auto [R] Report [T] TestTrade [Q] Quit")

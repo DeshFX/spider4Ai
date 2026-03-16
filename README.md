@@ -69,6 +69,22 @@ Simulate Sepolia transaction:
 python main.py testtrade
 ```
 
+
+## Dashboard-First Quick Start
+
+The recommended way to operate Spider4AI is the integrated dashboard:
+
+```bash
+python main.py
+```
+
+Use hotkeys inside the dashboard:
+- `S` run scan now
+- `A` toggle auto-scan scheduler
+- `R` generate report
+- `T` run Sepolia test transaction
+- `Q` quit
+
 ## Spider Agent Loop
 
 The `SpiderAgent` module encapsulates the complete workflow:

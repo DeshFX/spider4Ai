@@ -34,5 +34,5 @@ class SepoliaExecutor:
             "chainId": settings.default_chain_id,
         }
         signed = account.sign_transaction(tx)
-        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+        tx_hash = self.w3.eth.send_raw_transaction(signed.rawTransaction)
         return tx_hash.hex()

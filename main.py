@@ -35,12 +35,20 @@ def report_command() -> None:
 
 
 @app.command("testtrade")
-def test_trade_command() -> None:
+def test_trade_command(
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmation and execute test transaction immediately.",
+    )
+) -> None:
     """Simulate Sepolia testnet transaction flow."""
-    execute = typer.confirm("Execute test transaction?", default=False)
-    if not execute:
-        typer.echo("Transaction simulation cancelled.")
-        return
+    if not yes:
+        execute = typer.confirm("Execute test transaction?", default=False)
+        if not execute:
+            typer.echo("Transaction simulation cancelled.")
+            return
 
     executor = SepoliaExecutor()
     tx_hash = executor.simulate_test_transaction()

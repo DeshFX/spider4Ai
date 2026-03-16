@@ -45,6 +45,7 @@ python main.py scan
 ```
 
 Start dashboard (or just run `python main.py`):
+Start dashboard:
 
 ```bash
 python main.py dashboard

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+"""Textual dashboard for Spider4AI live monitoring."""
+
+from __future__ import annotations
+
 from datetime import datetime
 
 from rich.table import Table
@@ -13,11 +17,14 @@ from textual.widgets import Footer, Header, Static
 from agents.spider_agent import SpiderAgent
 from execution.sepolia_executor import SepoliaExecutor
 from reports.report_generator import ReportGenerator
+from textual.widgets import Header, Footer, Static
+
 from storage.database import Database
 
 
 class SpiderDashboard(App[None]):
     """Terminal dashboard that centralizes monitoring and operational actions."""
+    """Terminal dashboard that refreshes opportunities and system status."""
 
     CSS = """
     Screen { layout: vertical; }
@@ -42,6 +49,11 @@ class SpiderDashboard(App[None]):
         self.auto_scan_enabled = False
         self.last_action = "Ready (dashboard-first mode)"
         self.last_scan_result = "Not run"
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.db = Database()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -154,6 +166,11 @@ class SpiderDashboard(App[None]):
         self.query_one("#watchlist", Static).update(watch_table)
         self.query_one("#status", Static).update(status_table)
         self.query_one("#log_panel", Static).update(log_table)
+        status_table.add_row("Local time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+        self.query_one("#top_opps", Static).update(top_table)
+        self.query_one("#watchlist", Static).update(watch_table)
+        self.query_one("#status", Static).update(status_table)
 
 
 def run_dashboard() -> None:

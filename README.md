@@ -44,11 +44,19 @@ Run market scan:
 python main.py scan
 ```
 
+Start dashboard (or just run `python main.py`):
 Start dashboard:
 
 ```bash
 python main.py dashboard
 ```
+
+Dashboard hotkeys:
+- `S` run scan now
+- `A` toggle auto-scan scheduler
+- `R` generate report
+- `T` run Sepolia test transaction
+- `Q` quit
 
 Generate report:
 
@@ -61,6 +69,22 @@ Simulate Sepolia transaction:
 ```bash
 python main.py testtrade
 ```
+
+
+## Dashboard-First Quick Start
+
+The recommended way to operate Spider4AI is the integrated dashboard:
+
+```bash
+python main.py
+```
+
+Use hotkeys inside the dashboard:
+- `S` run scan now
+- `A` toggle auto-scan scheduler
+- `R` generate report
+- `T` run Sepolia test transaction
+- `Q` quit
 
 ## Spider Agent Loop
 

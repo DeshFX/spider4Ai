@@ -9,6 +9,7 @@ from typing import Any
 from config import settings
 from storage.database import Database
 from structured_logging import log_json
+import logging
 
 logger = logging.getLogger(__name__)
 CRITICAL_RISK_FLAGS = {"blacklisted_token", "scam_flag", "rug_risk", "honeypot_risk"}
@@ -44,6 +45,7 @@ class TradeManager:
         if str(opportunity.get("genlayer_decision") or "").upper() == "SCAM":
             return False, "scam_flagged"
         if float(opportunity.get("genlayer_confidence") or 0) < max(0.7, settings.min_trade_confidence):
+        if float(opportunity.get("genlayer_confidence") or 0) < settings.min_trade_confidence:
             return False, "confidence_below_threshold"
         if any(flag in CRITICAL_RISK_FLAGS for flag in opportunity.get("risk_flags", [])):
             return False, "critical_risk_flag"
@@ -72,6 +74,9 @@ class TradeManager:
             1.0,
         )
         base_pct = min_pct + (pct_range * normalized_conf)
+        normalized_conf = min(max((confidence - settings.min_trade_confidence) / max(1e-6, 1 - settings.min_trade_confidence), 0.0), 1.0)
+        base_pct = min_pct + (pct_range * normalized_conf)
+
         if market_stability < 0.45:
             base_pct *= 0.75
         if disagreement < 0.2:
@@ -82,6 +87,7 @@ class TradeManager:
         size_pct = min(max(base_pct, min_pct), max_pct)
         capital = settings.paper_capital_usd
         size_usd = min(capital * size_pct, settings.max_trade_size_usd)
+        size_usd = capital * size_pct
         entry_price = max(float(opportunity.get("price") or 0), 1e-9)
         tp_multiplier = 1 + settings.take_profit_pct + (max(0.0, confidence - 0.7) * 0.1)
         sl_multiplier = 1 - settings.stop_loss_pct
@@ -122,6 +128,8 @@ class TradeManager:
             plan=plan.__dict__,
             tx_hash=tx_hash,
         )
+        self.db.record_trade_event(opportunity.get("symbol", ""), "ENTRY", {"plan": plan.__dict__, "tx_hash": tx_hash})
+        log_json(logger, logging.INFO, "position_opened", symbol=opportunity.get("symbol"), plan=plan.__dict__, tx_hash=tx_hash)
         return position_id
 
     def evaluate_exit(self, position: dict[str, Any], current_price: float) -> tuple[str, float]:
@@ -135,6 +143,7 @@ class TradeManager:
         trailing_floor = peak_price * (
             1 - float(position.get("trailing_stop_pct") or settings.trailing_stop_pct)
         )
+        trailing_floor = peak_price * (1 - float(position.get("trailing_stop_pct") or settings.trailing_stop_pct))
         if current_price < trailing_floor and peak_price > entry_price:
             return "TRAILING_STOP", pnl_pct
         return "HOLD", pnl_pct
@@ -144,6 +153,7 @@ class TradeManager:
             str(item.get("symbol", "")).upper(): float(item.get("current_price") or 0)
             for item in markets
         }
+        price_map = {str(item.get("symbol", "")).upper(): float(item.get("current_price") or 0) for item in markets}
         for position in self.db.get_open_positions():
             current_price = price_map.get(position.get("symbol", "").upper())
             if current_price is None:
@@ -167,3 +177,5 @@ class TradeManager:
                 pnl_pct=round(pnl_pct, 4),
                 current_price=current_price,
             )
+            self.db.record_trade_event(position.get("symbol", ""), exit_reason, {"pnl_pct": pnl_pct, "current_price": current_price})
+            log_json(logger, logging.INFO, "position_closed", symbol=position.get("symbol"), exit_reason=exit_reason, pnl_pct=round(pnl_pct, 4), current_price=current_price)

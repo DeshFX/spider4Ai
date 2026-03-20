@@ -100,6 +100,11 @@ class LocalFallbackDecisionEngine:
             "decision_source": "heuristic",
             "reason": reason,
         }
+            log_json(logger, logging.WARNING, "decision_fallback", path="local_ai", token=payload.get("token"), reason=reason, decision=llm_result)
+            return {"status": "fallback", "decision": llm_result, "decision_source": "local_ai", "reason": reason}
+        heuristic = self._heuristic_decision(payload)
+        log_json(logger, logging.WARNING, "decision_fallback", path="heuristic", token=payload.get("token"), reason=reason, decision=heuristic)
+        return {"status": "fallback", "decision": heuristic, "decision_source": "heuristic", "reason": reason}
 
     def _ollama_decision(self, prompt: str) -> dict[str, Any] | None:
         try:
@@ -123,6 +128,7 @@ class LocalFallbackDecisionEngine:
             return {"final_decision": "SKIP", "confidence": 0.65, "votes": [], "reasoning": "Heuristic risk filter rejected trade.", "disagreement": 0.15}
         if signal_strength >= 0.75:
             return {"final_decision": "BUY", "confidence": 0.72, "votes": [], "reasoning": "Heuristic momentum and conviction threshold passed.", "disagreement": 0.1}
+            return {"final_decision": "BUY", "confidence": 0.62, "votes": [], "reasoning": "Heuristic momentum and conviction threshold passed.", "disagreement": 0.1}
         if signal_strength >= 0.5:
             return {"final_decision": "WAIT", "confidence": 0.55, "votes": [], "reasoning": "Heuristic prefers more confirmation.", "disagreement": 0.2}
         return {"final_decision": "SKIP", "confidence": 0.58, "votes": [], "reasoning": "Heuristic found insufficient edge.", "disagreement": 0.12}
@@ -136,6 +142,7 @@ class GenLayerService:
         timeout_seconds: float | None = None,
         fallback_engine: LocalFallbackDecisionEngine | None = None,
     ) -> None:
+    def __init__(self, enabled: bool | None = None, retries: int | None = None, timeout_seconds: float | None = None, fallback_engine: LocalFallbackDecisionEngine | None = None) -> None:
         self.enabled = settings.genlayer_enabled if enabled is None else enabled
         self.retries = retries if retries is not None else settings.genlayer_max_retries
         self.timeout_seconds = timeout_seconds if timeout_seconds is not None else settings.genlayer_timeout_seconds
@@ -152,6 +159,7 @@ class GenLayerService:
                 "decision_source": "disabled",
                 "payload": normalized_payload,
             }
+            return {"status": "disabled", "reason": "GenLayer integration disabled via configuration.", "decision_source": "disabled", "payload": normalized_payload}
 
         errors: list[str] = []
         for attempt in range(1, self.retries + 1):
@@ -189,6 +197,12 @@ class GenLayerService:
                     error=str(exc),
                     token=normalized_payload.get("token"),
                 )
+                result = contract.evaluate_trade(normalized_payload, timeout_seconds=self.timeout_seconds)
+                log_json(logger, logging.INFO, "decision_result", path="genlayer", attempt=attempt, contract_address=contract.address, decision=result.get("decision"), tx_hash=result.get("transaction_hash"))
+                return {"status": "submitted", "contract_address": contract.address, "decision_source": "genlayer", "attempt": attempt, **result}
+            except Exception as exc:
+                errors.append(f"attempt {attempt}: {exc}")
+                log_json(logger, logging.WARNING, "decision_retry", attempt=attempt, error=str(exc), token=normalized_payload.get("token"))
 
         fallback_reason = "; ".join(errors) if errors else "unknown GenLayer failure"
         fallback_result = self.fallback_engine.decide(normalized_payload, fallback_reason)
@@ -265,6 +279,7 @@ def normalize_decision_payload(payload: Any) -> dict[str, Any]:
         "reasoning": reasoning,
         "disagreement": round(disagreement, 4),
     }
+    return {"final_decision": decision, "confidence": round(confidence, 4), "votes": votes, "reasoning": reasoning, "disagreement": round(disagreement, 4)}
 
 
 def _call_with_timeout(callable_obj: Any, timeout_seconds: float) -> Any:

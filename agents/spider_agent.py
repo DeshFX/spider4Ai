@@ -95,6 +95,7 @@ class SpiderAgent:
             decision=decision,
             source=opportunity.get("decision_source"),
         )
+        log_json(logger, logging.INFO, "decision_applied", symbol=opportunity.get("symbol"), decision=decision, source=opportunity.get("decision_source"))
 
     def _execute_decision(self, opportunity: dict[str, Any]) -> None:
         decision = opportunity.get("genlayer_decision")
@@ -122,6 +123,10 @@ class SpiderAgent:
                 reason=opportunity.get("genlayer_reasoning"),
                 source=opportunity.get("decision_source"),
             )
+            opportunity["risk_flags"] = list(set(opportunity.get("risk_flags", [])) | {"blacklisted_token"})
+            self.db.blacklist_token(opportunity.get("coin_id"), opportunity.get("symbol", ""), opportunity.get("genlayer_reasoning", "SCAM decision"), opportunity.get("decision_source", "unknown"))
+            self.db.record_trade_event(opportunity.get("symbol", ""), "SCAM", {"reason": opportunity.get("genlayer_reasoning")})
+            log_json(logger, logging.WARNING, "token_blacklisted", symbol=opportunity.get("symbol"), reason=opportunity.get("genlayer_reasoning"), source=opportunity.get("decision_source"))
             return
         if decision != "BUY":
             opportunity["execution_status"] = "deferred" if decision == "WAIT" else "skipped"
@@ -139,6 +144,7 @@ class SpiderAgent:
         if settings.dry_run:
             opportunity["execution_status"] = "dry_run"
         elif settings.sepolia_rpc_url and settings.wallet_private_key:
+        if settings.sepolia_rpc_url and settings.wallet_private_key:
             try:
                 tx_hash = SepoliaExecutor().simulate_test_transaction()
                 opportunity["execution_status"] = "submitted"
@@ -151,6 +157,7 @@ class SpiderAgent:
                     symbol=opportunity.get("symbol"),
                     error=str(exc),
                 )
+                log_json(logger, logging.ERROR, "execution_failed", symbol=opportunity.get("symbol"), error=str(exc))
                 return
         else:
             opportunity["execution_status"] = "paper_position_opened"
@@ -170,6 +177,7 @@ class SpiderAgent:
             tx_hash=tx_hash,
             size_usd=plan.size_usd,
         )
+        log_json(logger, logging.INFO, "execution_result", symbol=opportunity.get("symbol"), status=opportunity.get("execution_status"), tx_hash=tx_hash, size_usd=plan.size_usd)
 
     def run_cycle(self) -> list[dict[str, Any]]:
         markets = self.coingecko.fetch_mid_cap_markets(200)
@@ -237,6 +245,16 @@ class SpiderAgent:
                         "recent_trend": payload["recent_trend"],
                     }
                 )
+                    "coin_id": coin.get("id"), "symbol": symbol, "narrative": narrative, "score": score,
+                    "accumulation_score": accumulation_score, "volume_24h": coin.get("total_volume", 0),
+                    "liquidity": dex_data.get("liquidity", 0), "price": coin.get("current_price", 0),
+                    "reason": f"{reasoning}; {risk_reason}", "market_stability": market_stability,
+                }
+                payload = self.build_decision_payload(coin, opportunity, risk_flags, market_stability, recent_trend)
+                opportunity.update({
+                    "summary": payload["summary"], "risk_flags": payload["risk_flags"], "signal_strength": payload["signal_strength"],
+                    "source": payload["source"], "market_context": payload["market_context"], "recent_trend": payload["recent_trend"],
+                })
                 self._apply_genlayer_decision(opportunity, payload)
                 self._execute_decision(opportunity)
                 opportunities.append(opportunity)
@@ -260,6 +278,7 @@ class SpiderAgent:
         dex_data: dict[str, Any],
         market_stability: float,
     ) -> list[str]:
+    def _build_risk_flags(self, coin: dict[str, Any], dex_data: dict[str, Any], market_stability: float) -> list[str]:
         flags: list[str] = []
         if market_stability < 0.35:
             flags.append("high_volatility")

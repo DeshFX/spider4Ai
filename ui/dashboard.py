@@ -3,10 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-"""Textual dashboard for Spider4AI live monitoring."""
-
-from __future__ import annotations
-
 from datetime import datetime
 
 from rich.table import Table
@@ -17,14 +13,11 @@ from textual.widgets import Footer, Header, Static
 from agents.spider_agent import SpiderAgent
 from execution.sepolia_executor import SepoliaExecutor
 from reports.report_generator import ReportGenerator
-from textual.widgets import Header, Footer, Static
-
 from storage.database import Database
 
 
 class SpiderDashboard(App[None]):
     """Terminal dashboard that centralizes monitoring and operational actions."""
-    """Terminal dashboard that refreshes opportunities and system status."""
 
     CSS = """
     Screen { layout: vertical; }
@@ -49,11 +42,6 @@ class SpiderDashboard(App[None]):
         self.auto_scan_enabled = False
         self.last_action = "Ready (dashboard-first mode)"
         self.last_scan_result = "Not run"
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.db = Database()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -124,26 +112,32 @@ class SpiderDashboard(App[None]):
 
         top_table = Table(title="Top Opportunities", expand=True)
         top_table.add_column("Coin", style="cyan")
+        top_table.add_column("Decision")
+        top_table.add_column("Confidence", justify="right")
+        top_table.add_column("Source")
         top_table.add_column("Score", style="green")
-        top_table.add_column("Narrative", style="magenta")
-        top_table.add_column("Volume", justify="right")
-        top_table.add_column("Price", justify="right")
         for coin in top:
+            decision = coin.get("genlayer_decision", "WAIT")
+            decision_color = {"BUY": "green", "WAIT": "yellow", "SCAM": "red"}.get(decision, "white")
             top_table.add_row(
                 coin["symbol"],
+                f"[{decision_color}]{decision}[/{decision_color}]",
+                f"{float(coin.get('genlayer_confidence', 0) or 0):.2f}",
+                str(coin.get("decision_source", "n/a")),
                 f"{coin['score']:.2f}",
-                coin.get("narrative", "N/A"),
-                f"{coin.get('volume_24h', 0):,.0f}",
-                f"${coin.get('price', 0):,.4f}",
             )
 
         watch_table = Table(title="Watchlist (60-70)", expand=True)
         watch_table.add_column("Coin", style="yellow")
-        watch_table.add_column("Score", style="green")
-        watch_table.add_column("Narrative", style="magenta")
+        watch_table.add_column("Decision")
+        watch_table.add_column("Confidence", justify="right")
         for coin in watch:
+            decision = coin.get("genlayer_decision", "WAIT")
+            decision_color = {"BUY": "green", "WAIT": "yellow", "SCAM": "red"}.get(decision, "white")
             watch_table.add_row(
-                coin["symbol"], f"{coin['score']:.2f}", coin.get("narrative", "N/A")
+                coin["symbol"],
+                f"[{decision_color}]{decision}[/{decision_color}]",
+                f"{float(coin.get('genlayer_confidence', 0) or 0):.2f}",
             )
 
         status_table = Table(title="System Status", expand=True)
@@ -151,6 +145,8 @@ class SpiderDashboard(App[None]):
         status_table.add_column("Value", style="bold green")
         status_table.add_row("Coins scanned", str(status["coins_scanned"]))
         status_table.add_row("Narratives detected", str(status["narratives_detected"]))
+        status_table.add_row("Blacklisted", str(status.get("blacklisted_tokens", 0)))
+        status_table.add_row("Open positions", str(status.get("open_positions", 0)))
         status_table.add_row("Last update", str(status["last_update"]))
         status_table.add_row("Auto scan", "ON" if self.auto_scan_enabled else "OFF")
         status_table.add_row("Last scan", self.last_scan_result)
@@ -166,11 +162,6 @@ class SpiderDashboard(App[None]):
         self.query_one("#watchlist", Static).update(watch_table)
         self.query_one("#status", Static).update(status_table)
         self.query_one("#log_panel", Static).update(log_table)
-        status_table.add_row("Local time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-
-        self.query_one("#top_opps", Static).update(top_table)
-        self.query_one("#watchlist", Static).update(watch_table)
-        self.query_one("#status", Static).update(status_table)
 
 
 def run_dashboard() -> None:

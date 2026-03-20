@@ -7,6 +7,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any, Iterable
+from pathlib import Path
 
 from config import settings
 
@@ -291,6 +292,13 @@ class Database:
             cur = conn.execute("SELECT * FROM opportunities ORDER BY score DESC, created_at DESC LIMIT ?", (limit,))
             rows = [dict(row) for row in cur.fetchall()]
         return [self._deserialize_opportunity(row) for row in rows]
+
+
+    def reset(self) -> None:
+        db_path = Path(self.db_path)
+        if db_path.exists():
+            db_path.unlink()
+        self._initialize()
 
     @staticmethod
     def _deserialize_opportunity(row: dict[str, Any]) -> dict[str, Any]:

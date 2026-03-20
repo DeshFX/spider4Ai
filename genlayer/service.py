@@ -67,6 +67,39 @@ class LocalFallbackDecisionEngine:
         prompt = build_decision_prompt(payload)
         llm_result = self._ollama_decision(prompt)
         if llm_result:
+            _debug_banner("[FALLBACK MODE] local_ai")
+            log_json(
+                logger,
+                logging.WARNING,
+                "decision_fallback",
+                path="local_ai",
+                token=payload.get("token"),
+                reason=reason,
+                decision=llm_result,
+            )
+            return {
+                "status": "fallback",
+                "decision": llm_result,
+                "decision_source": "local_ai",
+                "reason": reason,
+            }
+        heuristic = self._heuristic_decision(payload)
+        _debug_banner("[FALLBACK MODE] heuristic")
+        log_json(
+            logger,
+            logging.WARNING,
+            "decision_fallback",
+            path="heuristic",
+            token=payload.get("token"),
+            reason=reason,
+            decision=heuristic,
+        )
+        return {
+            "status": "fallback",
+            "decision": heuristic,
+            "decision_source": "heuristic",
+            "reason": reason,
+        }
             log_json(logger, logging.WARNING, "decision_fallback", path="local_ai", token=payload.get("token"), reason=reason, decision=llm_result)
             return {"status": "fallback", "decision": llm_result, "decision_source": "local_ai", "reason": reason}
         heuristic = self._heuristic_decision(payload)
@@ -94,6 +127,7 @@ class LocalFallbackDecisionEngine:
         if len(risk_flags) >= 3:
             return {"final_decision": "SKIP", "confidence": 0.65, "votes": [], "reasoning": "Heuristic risk filter rejected trade.", "disagreement": 0.15}
         if signal_strength >= 0.75:
+            return {"final_decision": "BUY", "confidence": 0.72, "votes": [], "reasoning": "Heuristic momentum and conviction threshold passed.", "disagreement": 0.1}
             return {"final_decision": "BUY", "confidence": 0.62, "votes": [], "reasoning": "Heuristic momentum and conviction threshold passed.", "disagreement": 0.1}
         if signal_strength >= 0.5:
             return {"final_decision": "WAIT", "confidence": 0.55, "votes": [], "reasoning": "Heuristic prefers more confirmation.", "disagreement": 0.2}
@@ -101,6 +135,13 @@ class LocalFallbackDecisionEngine:
 
 
 class GenLayerService:
+    def __init__(
+        self,
+        enabled: bool | None = None,
+        retries: int | None = None,
+        timeout_seconds: float | None = None,
+        fallback_engine: LocalFallbackDecisionEngine | None = None,
+    ) -> None:
     def __init__(self, enabled: bool | None = None, retries: int | None = None, timeout_seconds: float | None = None, fallback_engine: LocalFallbackDecisionEngine | None = None) -> None:
         self.enabled = settings.genlayer_enabled if enabled is None else enabled
         self.retries = retries if retries is not None else settings.genlayer_max_retries
@@ -111,12 +152,51 @@ class GenLayerService:
         normalized_payload = normalize_trade_payload(payload)
         log_json(logger, logging.INFO, "decision_payload", payload=normalized_payload)
         if not self.enabled:
+            _debug_banner("[FALLBACK MODE] disabled")
+            return {
+                "status": "disabled",
+                "reason": "GenLayer integration disabled via configuration.",
+                "decision_source": "disabled",
+                "payload": normalized_payload,
+            }
             return {"status": "disabled", "reason": "GenLayer integration disabled via configuration.", "decision_source": "disabled", "payload": normalized_payload}
 
         errors: list[str] = []
         for attempt in range(1, self.retries + 1):
             try:
                 contract = get_contract_at()
+                result = contract.evaluate_trade(
+                    normalized_payload,
+                    timeout_seconds=self.timeout_seconds,
+                )
+                _debug_banner("[GENLAYER ACTIVE]")
+                log_json(
+                    logger,
+                    logging.INFO,
+                    "decision_result",
+                    path="genlayer",
+                    attempt=attempt,
+                    contract_address=contract.address,
+                    decision=result.get("decision"),
+                    tx_hash=result.get("transaction_hash"),
+                )
+                return {
+                    "status": "submitted",
+                    "contract_address": contract.address,
+                    "decision_source": "genlayer",
+                    "attempt": attempt,
+                    **result,
+                }
+            except Exception as exc:
+                errors.append(f"attempt {attempt}: {exc}")
+                log_json(
+                    logger,
+                    logging.WARNING,
+                    "decision_retry",
+                    attempt=attempt,
+                    error=str(exc),
+                    token=normalized_payload.get("token"),
+                )
                 result = contract.evaluate_trade(normalized_payload, timeout_seconds=self.timeout_seconds)
                 log_json(logger, logging.INFO, "decision_result", path="genlayer", attempt=attempt, contract_address=contract.address, decision=result.get("decision"), tx_hash=result.get("transaction_hash"))
                 return {"status": "submitted", "contract_address": contract.address, "decision_source": "genlayer", "attempt": attempt, **result}
@@ -192,6 +272,13 @@ def normalize_decision_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(votes, list):
         raise GenLayerError("votes must be a list.")
     reasoning = str(payload.get("reasoning") or "")
+    return {
+        "final_decision": decision,
+        "confidence": round(confidence, 4),
+        "votes": votes,
+        "reasoning": reasoning,
+        "disagreement": round(disagreement, 4),
+    }
     return {"final_decision": decision, "confidence": round(confidence, 4), "votes": votes, "reasoning": reasoning, "disagreement": round(disagreement, 4)}
 
 
@@ -203,3 +290,7 @@ def _call_with_timeout(callable_obj: Any, timeout_seconds: float) -> Any:
         except FuturesTimeoutError as exc:
             future.cancel()
             raise GenLayerError(f"Timed out after {timeout_seconds} seconds") from exc
+
+
+def _debug_banner(message: str) -> None:
+    print(message)

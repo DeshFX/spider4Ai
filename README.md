@@ -1,101 +1,113 @@
 # Spider4AI
 
-Spider4AI is an autonomous crypto market hunter agent focused on **mid-cap opportunity discovery**. It scans markets, detects narratives, identifies accumulation signals, ranks coins with a conviction model, and supports optional Sepolia testnet transaction simulation.
+Spider4AI adalah agen AI crypto semi-production yang:
+- scan market data
+- enrich dengan liquidity / narrative
+- kirim payload ke GenLayer bila aktif
+- fallback ke local AI / heuristic bila GenLayer gagal
+- menerapkan guardrail eksekusi, sizing, cooldown, dan exit monitoring.
 
-> Safety first: Spider4AI does **not** perform real trading. The execution module is testnet-only.
+## Arsitektur
 
-## Features
+- `agents/` → orchestration pipeline utama (`SpiderAgent`)
+- `genlayer/` → client, contract adapter, fallback, decision transport
+- `execution/` → safety layer, sizing, cooldown, position management, Sepolia test executor
+- `storage/` → SQLite persistence untuk opportunities, blacklist, positions, trade events
+- `ui/` → dashboard terminal Textual
 
-- Market scanner for mid-cap assets (CoinGecko)
-- DEX radar for trending token liquidity/volume (Dexscreener)
-- Narrative detection (Ollama-compatible with keyword fallback)
-- Accumulation signal detection
-- 0–100 conviction scoring engine
-- Risk filter for suspicious assets
-- Real-time terminal dashboard (Textual + Rich)
-- Daily report generator
-- Optional Sepolia test transaction simulation (web3.py)
+## Setup cepat (.env based)
 
-## Installation
-
-1. Ensure Python 3.11 is installed.
-2. Create and activate a virtual environment.
-3. Install dependencies:
+1. Pastikan Python 3.11 tersedia.
+2. Buat virtualenv.
+3. Install dependency:
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Configuration
+4. Buat file `.env` di root project:
 
-Set environment variables as needed:
-
-- `SPIDER4AI_DB_PATH` (default `spider4ai.db`)
-- `SPIDER4AI_OLLAMA_URL` (default `http://localhost:11434`)
-- `SPIDER4AI_OLLAMA_MODEL` (default `llama3`)
-- `SPIDER4AI_SEPOLIA_RPC_URL` (required for `testtrade`)
-- `SPIDER4AI_WALLET_PRIVATE_KEY` (required for `testtrade`)
-
-## Usage
-
-Run market scan:
-
-```bash
-python main.py scan
+```env
+SPIDER4AI_DB_PATH=spider4ai.db
+SPIDER4AI_OLLAMA_URL=http://localhost:11434
+SPIDER4AI_OLLAMA_MODEL=llama3
+SPIDER4AI_GENLAYER_ENABLED=false
+SPIDER4AI_GENLAYER_CONTRACT_ADDRESS=
+SPIDER4AI_SEPOLIA_RPC_URL=
+SPIDER4AI_WALLET_PRIVATE_KEY=
+SPIDER4AI_DRY_RUN=true
+SPIDER4AI_MAX_TRADE_SIZE_USD=500
 ```
 
-Start dashboard (or just run `python main.py`):
-Start dashboard:
+Project sekarang memakai `python-dotenv`, jadi `.env` akan otomatis dibaca saat startup.
+
+## GenLayer vs fallback
+
+- Jika `SPIDER4AI_GENLAYER_ENABLED=true` dan contract address valid, system akan mencoba GenLayer.
+- Jika gagal, system fallback ke local AI, lalu ke heuristic.
+- Debug banner akan muncul sebagai:
+  - `[GENLAYER ACTIVE]`
+  - `[FALLBACK MODE]`
+
+## DRY_RUN
+
+`SPIDER4AI_DRY_RUN=true` adalah mode aman default.
+Dalam mode ini:
+- trade tetap diputuskan
+- position plan tetap dibuat
+- database tetap diupdate
+- tetapi transaksi nyata tidak dikirim.
+
+Set `SPIDER4AI_DRY_RUN=false` hanya jika kamu benar-benar ingin melewati bridge eksekusi testnet.
+
+## Commands
 
 ```bash
-python main.py dashboard
+python main.py                 # dashboard default
+python main.py scan            # run scan
+python main.py agent-run       # full pipeline
+python main.py genlayer-test   # kirim dummy payload ke GenLayer/fallback
+python main.py db-check        # cek 10 opportunity terakhir
+python main.py status          # status config / rpc / wallet / genlayer
+python main.py report          # generate report markdown
+python main.py testtrade --yes # test Sepolia tx
+python main.py reset-db --yes  # hapus database lokal
 ```
 
-Dashboard hotkeys:
-- `S` run scan now
-- `A` toggle auto-scan scheduler
-- `R` generate report
-- `T` run Sepolia test transaction
-- `Q` quit
+## Dashboard
 
-Generate report:
+Dashboard menampilkan:
+- symbol coin
+- decision (`BUY / WAIT / SCAM`)
+- confidence
+- decision source (`genlayer / local_ai / heuristic / disabled`)
+- status sistem, watchlist, dan log action.
 
-```bash
-python main.py report
-```
+## Troubleshooting
 
-Simulate Sepolia transaction:
+### Semua decision_source = disabled
+Pastikan memakai:
+- `SPIDER4AI_GENLAYER_ENABLED=true`
+- bukan `SPIDER4AI_ENABLE_GENLAYER` saja (alias lama masih didukung)
 
-```bash
-python main.py testtrade
-```
+### Test trade gagal
+Cek:
+- `SPIDER4AI_SEPOLIA_RPC_URL`
+- `SPIDER4AI_WALLET_PRIVATE_KEY`
+- saldo Sepolia ETH
+- RPC benar-benar mengarah ke Sepolia
 
+### Tidak ada transaksi walau BUY
+Kemungkinan:
+- `SPIDER4AI_DRY_RUN=true`
+- confidence < 0.7
+- token masuk blacklist
+- disagreement validator terlalu tinggi
+- cooldown masih aktif
 
-## Dashboard-First Quick Start
+## Catatan keamanan
 
-The recommended way to operate Spider4AI is the integrated dashboard:
-
-```bash
-python main.py
-```
-
-Use hotkeys inside the dashboard:
-- `S` run scan now
-- `A` toggle auto-scan scheduler
-- `R` generate report
-- `T` run Sepolia test transaction
-- `Q` quit
-
-## Spider Agent Loop
-
-The `SpiderAgent` module encapsulates the complete workflow:
-
-1. Scan markets
-2. Update database
-3. Detect narratives
-4. Run accumulation analysis
-5. Compute conviction scores
-6. Filter risk
-7. Save ranked opportunities
-
-A background scheduler helper is included to run this loop every 10 minutes.
+Spider4AI belum membeli token scan secara real. Executor Sepolia saat ini tetap bersifat test transaction bridge.
+Gunakan wallet testnet dan jangan pakai private key wallet utama.

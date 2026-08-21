@@ -43,6 +43,9 @@ class Settings:
     env_file: str = _env("SPIDER4AI_ENV_FILE", default=".env")
     coingecko_base_url: str = _env("SPIDER4AI_COINGECKO_URL", default="https://api.coingecko.com/api/v3")
     dexscreener_base_url: str = _env("SPIDER4AI_DEXSCREENER_URL", default="https://api.dexscreener.com")
+    cambrian_base_url: str = _env("CAMBRIAN_BASE_URL", default="https://api.cambrian.org")
+    cambrian_api_key: str = _env("CAMBRIAN_API_KEY")
+    watchlist: str = _env("SPIDER4AI_WATCHLIST", default="BTC,ETH,SOL,PEPE,WIF,BONK")
     ollama_base_url: str = _env("SPIDER4AI_OLLAMA_URL", default="http://localhost:11434")
     ollama_model: str = _env("SPIDER4AI_OLLAMA_MODEL", default="llama3")
     scheduler_minutes: int = int(_env("SPIDER4AI_SCHEDULER_MINUTES", default="10"))
@@ -67,7 +70,45 @@ class Settings:
     take_profit_pct: float = float(_env("SPIDER4AI_TAKE_PROFIT_PCT", default="0.2"))
     stop_loss_pct: float = float(_env("SPIDER4AI_STOP_LOSS_PCT", default="0.07"))
     trailing_stop_pct: float = float(_env("SPIDER4AI_TRAILING_STOP_PCT", default="0.05"))
+    circuit_breaker_enabled: bool = _env_bool("SPIDER4AI_CIRCUIT_BREAKER_ENABLED", default=True)
+    circuit_breaker_max_losses: int = int(_env("SPIDER4AI_CIRCUIT_BREAKER_MAX_LOSSES", default="3"))
+    circuit_breaker_pause_minutes: int = int(_env("SPIDER4AI_CIRCUIT_BREAKER_PAUSE_MINUTES", default="30"))
     dry_run: bool = _env_bool("SPIDER4AI_DRY_RUN", default=True)
+
+    tier_alpha_max_fdv: float = float(_env("SPIDER4AI_TIER_ALPHA_MAX_FDV", default="200000"))
+    tier_low_max_fdv: float = float(_env("SPIDER4AI_TIER_LOW_MAX_FDV", default="5000000"))
+    tier_mid_max_fdv: float = float(_env("SPIDER4AI_TIER_MID_MAX_FDV", default="100000000"))
+    alpha_hunter_enabled: bool = _env_bool("SPIDER4AI_ALPHA_HUNTER_ENABLED", default=False)
+    alpha_hunter_limit: int = int(_env("SPIDER4AI_ALPHA_HUNTER_LIMIT", default="10"))
+    alpha_min_fdv: float = float(_env("SPIDER4AI_ALPHA_MIN_FDV", default="10000"))
+    rugcheck_top_holder_pct: float = float(_env("SPIDER4AI_RUGCHECK_TOP_HOLDER_PCT", default="20"))
+    rugcheck_top10_holder_pct: float = float(_env("SPIDER4AI_RUGCHECK_TOP10_HOLDER_PCT", default="50"))
+    rugcheck_max_holders: int = int(_env("SPIDER4AI_RUGCHECK_MAX_HOLDERS", default="100"))
+
+    cambrian_monthly_budget: int = int(_env("CAMBRIAN_MONTHLY_BUDGET", default="1000"))
+    cambrian_safety_margin: float = float(_env("CAMBRIAN_SAFETY_MARGIN", default="0.9"))
+    cambrian_cache_ttl_seconds: float = float(_env("CAMBRIAN_CACHE_TTL_SECONDS", default="300"))
+    cambrian_liquidity_volume_divisor: float = float(_env("CAMBRIAN_LIQUIDITY_VOLUME_DIVISOR", default="5"))
+
+    exit_crash_drop_pct: float = float(_env("SPIDER4AI_EXIT_CRASH_DROP_PCT", default="25"))
+    exit_crash_window_minutes: int = int(_env("SPIDER4AI_EXIT_CRASH_WINDOW_MINUTES", default="15"))
+    exit_dev_whale_sell_pct: float = float(_env("SPIDER4AI_EXIT_DEV_WHALE_SELL_PCT", default="30"))
+    exit_take_profit_partial_multiplier: float = float(_env("SPIDER4AI_EXIT_TP_PARTIAL_MULTIPLIER", default="2.0"))
+    exit_take_profit_partial_sell_pct: float = float(_env("SPIDER4AI_EXIT_TP_PARTIAL_SELL_PCT", default="50"))
+
+    telegram_bot_token: str = _env("SPIDER4AI_TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: str = _env("SPIDER4AI_TELEGRAM_CHAT_ID")
+
+    def classify_tier(self, fdv: float) -> str:
+        """Map an FDV (fully diluted valuation) to a market-cap tier."""
+        fdv = max(0.0, float(fdv or 0))
+        if fdv <= self.tier_alpha_max_fdv:
+            return "alpha"
+        if fdv <= self.tier_low_max_fdv:
+            return "low"
+        if fdv <= self.tier_mid_max_fdv:
+            return "mid"
+        return "big"
 
     def validate_startup(self) -> None:
         missing: list[str] = []
@@ -116,7 +157,11 @@ class Settings:
     sepolia_rpc_url: str = os.getenv("SPIDER4AI_SEPOLIA_RPC_URL", "")
     wallet_private_key: str = os.getenv("SPIDER4AI_WALLET_PRIVATE_KEY", "")
     default_chain_id: int = int(os.getenv("SPIDER4AI_CHAIN_ID", "11155111"))
-    genlayer_enabled: bool = os.getenv("SPIDER4AI_ENABLE_GENLAYER", "false").lower() in {
+    genlayer_enabled: bool = (
+        os.getenv("SPIDER4AI_GENLAYER_ENABLED")
+        or os.getenv("SPIDER4AI_ENABLE_GENLAYER")
+        or "false"
+    ).lower() in {
         "1",
         "true",
         "yes",

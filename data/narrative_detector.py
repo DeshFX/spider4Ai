@@ -8,6 +8,7 @@ from typing import Any
 import requests
 
 from config import settings
+from data.cambrian_client import get_social_sentiment
 
 NARRATIVES = ["AI", "DePIN", "Gaming", "Layer2", "RWA", "Restaking", "Meme"]
 
@@ -31,6 +32,10 @@ class NarrativeDetector:
 
     def classify(self, coin: dict[str, Any]) -> tuple[str, float, str]:
         """Return narrative, confidence, and reasoning note."""
+        cambrian_narrative, cambrian_conf = self._classify_with_cambrian(coin)
+        if cambrian_narrative:
+            return cambrian_narrative, cambrian_conf, "Cambrian narrative data"
+
         prompt = (
             "Classify this crypto project into one category only from: "
             f"{', '.join(NARRATIVES)}. "
@@ -50,6 +55,15 @@ class NarrativeDetector:
 
         fallback = self._keyword_fallback(coin)
         return fallback, 0.5, "Keyword fallback classification"
+
+    def _classify_with_cambrian(self, coin: dict[str, Any]) -> tuple[str | None, float]:
+        """Classify using Cambrian social/narrative data; return (narrative, confidence)."""
+        sentiment = get_social_sentiment(coin.get("symbol") or coin.get("name") or "")
+        narrative = (sentiment.get("narrative") or "").strip()
+        if narrative in NARRATIVES:
+            confidence = max(0.0, min(1.0, float(sentiment.get("score", 0) or 0)))
+            return narrative, confidence
+        return None, 0.0
 
     def _classify_with_ollama(self, prompt: str) -> dict[str, Any] | None:
         url = f"{self.ollama_url}/api/generate"

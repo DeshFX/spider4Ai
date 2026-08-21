@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -10,6 +11,8 @@ from typing import Any, Iterable
 from pathlib import Path
 
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
@@ -118,6 +121,12 @@ class Database:
                     payload_json TEXT,
                     created_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS api_call_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    endpoint TEXT,
+                    response_status INTEGER
+                );
                 """
             )
             for column, ddl in (
@@ -128,6 +137,13 @@ class Database:
                 ("genlayer_tx_hash", "TEXT"), ("decision_source", "TEXT"), ("execution_status", "TEXT"), ("execution_tx_hash", "TEXT"),
             ):
                 self._ensure_column(conn, "opportunities", column, ddl)
+            for column, ddl in (
+                ("partial_sell_done", "INTEGER DEFAULT 0"),
+                ("tracked_dev_wallet", "TEXT"),
+                ("tracked_top_holder_wallets", "TEXT"),
+                ("last_price_at", "TEXT"),
+            ):
+                self._ensure_column(conn, "positions", column, ddl)
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -213,16 +229,22 @@ class Database:
 
     def insert_position(self, row: dict[str, Any]) -> int:
         now = datetime.utcnow().isoformat()
+        tracked_holders = row.get("tracked_top_holder_wallets") or []
+        if isinstance(tracked_holders, str):
+            tracked_holders = json.loads(tracked_holders)
         with self._connect() as conn:
             cur = conn.execute(
                 """INSERT INTO positions
                 (coin_id, symbol, decision_source, entry_price, size_usd, size_pct, take_profit_price, stop_loss_price,
-                 trailing_stop_pct, peak_price, execution_tx_hash, status, opened_at, last_price)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 trailing_stop_pct, peak_price, execution_tx_hash, status, opened_at, last_price, partial_sell_done,
+                 tracked_dev_wallet, tracked_top_holder_wallets, last_price_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     row.get("coin_id"), row.get("symbol"), row.get("decision_source"), row.get("entry_price"), row.get("size_usd"), row.get("size_pct"),
                     row.get("take_profit_price"), row.get("stop_loss_price"), row.get("trailing_stop_pct"), row.get("entry_price"),
                     row.get("execution_tx_hash"), row.get("status"), now, row.get("entry_price"),
+                    int(bool(row.get("partial_sell_done"))),
+                    row.get("tracked_dev_wallet"), json.dumps(tracked_holders), now,
                 ),
             )
             return int(cur.lastrowid)
@@ -254,6 +276,47 @@ class Database:
                 (symbol, event_type, json.dumps(payload), now),
             )
 
+    def log_api_call(self, endpoint: str, response_status: int | None) -> None:
+        """Record a Cambrian API call (endpoint + HTTP status) into api_call_log."""
+        now = datetime.utcnow().isoformat()
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO api_call_log (timestamp, endpoint, response_status) VALUES (?, ?, ?)",
+                    (now, endpoint, response_status),
+                )
+        except sqlite3.Error:
+            logger.exception("Failed to persist Cambrian API call log")
+
+    def get_api_usage(self) -> dict[str, Any]:
+        """Return Cambrian API call counts for today, this month, and all-time."""
+        now = datetime.utcnow()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        with self._connect() as conn:
+            today = conn.execute(
+                "SELECT COUNT(*) AS c FROM api_call_log WHERE timestamp >= ?", (today_start,)
+            ).fetchone()["c"]
+            month = conn.execute(
+                "SELECT COUNT(*) AS c FROM api_call_log WHERE timestamp >= ?", (month_start,)
+            ).fetchone()["c"]
+            total = conn.execute("SELECT COUNT(*) AS c FROM api_call_log").fetchone()["c"]
+        return {"today_calls": today, "month_calls": month, "total_calls": total}
+
+    def update_position_last_price(self, position_id: int, current_price: float, at: str | None = None) -> None:
+        """Refresh the monitored price + timestamp used for crash-window detection."""
+        at = at or datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE positions SET last_price = ?, last_price_at = ? WHERE id = ?",
+                (current_price, at, position_id),
+            )
+
+    def mark_partial_sell(self, position_id: int) -> None:
+        """Flag a position as already partially sold (moonbag active, no repeat TP trigger)."""
+        with self._connect() as conn:
+            conn.execute("UPDATE positions SET partial_sell_done = 1 WHERE id = ?", (position_id,))
+
     def in_global_cooldown(self, cooldown_seconds: int) -> bool:
         cutoff = (datetime.utcnow() - timedelta(seconds=cooldown_seconds)).isoformat()
         with self._connect() as conn:
@@ -265,6 +328,31 @@ class Database:
         with self._connect() as conn:
             row = conn.execute("SELECT 1 FROM trade_events WHERE symbol = ? AND event_type = 'ENTRY' AND created_at >= ? LIMIT 1", (symbol, cutoff)).fetchone()
             return row is not None
+
+    def count_consecutive_losses(self) -> int:
+        """Count consecutive losing closed positions, newest first (stops at first win)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT pnl_pct FROM positions WHERE status = 'CLOSED' ORDER BY closed_at DESC, id DESC"
+            ).fetchall()
+        count = 0
+        for row in rows:
+            if float(row["pnl_pct"] or 0) < 0:
+                count += 1
+            else:
+                break
+        return count
+
+    def is_circuit_breaker_paused(self, pause_minutes: int) -> bool:
+        """True when a CIRCUIT_BREAKER event happened within the pause window."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT created_at FROM trade_events WHERE event_type = 'CIRCUIT_BREAKER' ORDER BY created_at DESC, id DESC LIMIT 1"
+            ).fetchone()
+        if not row:
+            return False
+        paused_at = datetime.fromisoformat(row["created_at"])
+        return (datetime.utcnow() - paused_at).total_seconds() < pause_minutes * 60
 
     def get_latest_opportunities(self, limit: int = 20) -> list[dict[str, Any]]:
         with self._connect() as conn:

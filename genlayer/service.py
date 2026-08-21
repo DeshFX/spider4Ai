@@ -26,14 +26,16 @@ class GenLayerError(RuntimeError):
 class GenLayerContract:
     client: Any
     address: str
-    wait_status: str = "FINALIZED"
+    account: Any = None
+    wait_status: str = "ACCEPTED"
 
     def evaluate_trade(self, data: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
         transaction_hash = _call_with_timeout(
             lambda: self.client.write_contract(
                 address=self.address,
                 function_name="evaluate_trade",
-                args=[data],
+                account=self.account,
+                args=[json.dumps(data)],
                 value=0,
             ),
             timeout_seconds=timeout_seconds,
@@ -41,19 +43,20 @@ class GenLayerContract:
         receipt = _call_with_timeout(
             lambda: self.client.wait_for_transaction_receipt(
                 transaction_hash=transaction_hash,
-                status=self.wait_status,
+                status=_status_enum(self.wait_status),
             ),
             timeout_seconds=timeout_seconds,
         )
         decision = _call_with_timeout(
-            lambda: self.client.read_contract(
+            lambda: _read_contract_text(
+                client=self.client,
                 address=self.address,
                 function_name="get_last_decision",
-                args=[],
+                account=self.account,
             ),
             timeout_seconds=timeout_seconds,
         )
-        normalized = normalize_decision_payload(decision)
+        normalized = normalize_decision_payload(json.loads(decision))
         return {"decision": normalized, "transaction_hash": transaction_hash, "receipt": receipt}
 
 
@@ -100,11 +103,6 @@ class LocalFallbackDecisionEngine:
             "decision_source": "heuristic",
             "reason": reason,
         }
-            log_json(logger, logging.WARNING, "decision_fallback", path="local_ai", token=payload.get("token"), reason=reason, decision=llm_result)
-            return {"status": "fallback", "decision": llm_result, "decision_source": "local_ai", "reason": reason}
-        heuristic = self._heuristic_decision(payload)
-        log_json(logger, logging.WARNING, "decision_fallback", path="heuristic", token=payload.get("token"), reason=reason, decision=heuristic)
-        return {"status": "fallback", "decision": heuristic, "decision_source": "heuristic", "reason": reason}
 
     def _ollama_decision(self, prompt: str) -> dict[str, Any] | None:
         try:
@@ -128,7 +126,6 @@ class LocalFallbackDecisionEngine:
             return {"final_decision": "SKIP", "confidence": 0.65, "votes": [], "reasoning": "Heuristic risk filter rejected trade.", "disagreement": 0.15}
         if signal_strength >= 0.75:
             return {"final_decision": "BUY", "confidence": 0.72, "votes": [], "reasoning": "Heuristic momentum and conviction threshold passed.", "disagreement": 0.1}
-            return {"final_decision": "BUY", "confidence": 0.62, "votes": [], "reasoning": "Heuristic momentum and conviction threshold passed.", "disagreement": 0.1}
         if signal_strength >= 0.5:
             return {"final_decision": "WAIT", "confidence": 0.55, "votes": [], "reasoning": "Heuristic prefers more confirmation.", "disagreement": 0.2}
         return {"final_decision": "SKIP", "confidence": 0.58, "votes": [], "reasoning": "Heuristic found insufficient edge.", "disagreement": 0.12}
@@ -142,7 +139,6 @@ class GenLayerService:
         timeout_seconds: float | None = None,
         fallback_engine: LocalFallbackDecisionEngine | None = None,
     ) -> None:
-    def __init__(self, enabled: bool | None = None, retries: int | None = None, timeout_seconds: float | None = None, fallback_engine: LocalFallbackDecisionEngine | None = None) -> None:
         self.enabled = settings.genlayer_enabled if enabled is None else enabled
         self.retries = retries if retries is not None else settings.genlayer_max_retries
         self.timeout_seconds = timeout_seconds if timeout_seconds is not None else settings.genlayer_timeout_seconds
@@ -159,7 +155,6 @@ class GenLayerService:
                 "decision_source": "disabled",
                 "payload": normalized_payload,
             }
-            return {"status": "disabled", "reason": "GenLayer integration disabled via configuration.", "decision_source": "disabled", "payload": normalized_payload}
 
         errors: list[str] = []
         for attempt in range(1, self.retries + 1):
@@ -197,12 +192,6 @@ class GenLayerService:
                     error=str(exc),
                     token=normalized_payload.get("token"),
                 )
-                result = contract.evaluate_trade(normalized_payload, timeout_seconds=self.timeout_seconds)
-                log_json(logger, logging.INFO, "decision_result", path="genlayer", attempt=attempt, contract_address=contract.address, decision=result.get("decision"), tx_hash=result.get("transaction_hash"))
-                return {"status": "submitted", "contract_address": contract.address, "decision_source": "genlayer", "attempt": attempt, **result}
-            except Exception as exc:
-                errors.append(f"attempt {attempt}: {exc}")
-                log_json(logger, logging.WARNING, "decision_retry", attempt=attempt, error=str(exc), token=normalized_payload.get("token"))
 
         fallback_reason = "; ".join(errors) if errors else "unknown GenLayer failure"
         fallback_result = self.fallback_engine.decide(normalized_payload, fallback_reason)
@@ -225,6 +214,8 @@ def build_decision_prompt(payload: dict[str, Any]) -> str:
         f"market_context: {payload.get('market_context', '')}\n"
         f"recent_trend: {payload.get('recent_trend', '')}\n"
         f"source: {payload.get('source', '')}\n"
+        f"tier: {payload.get('tier', '')}\n"
+        f"onchain_context: {payload.get('onchain_context', '')}\n"
     )
 
 
@@ -252,6 +243,8 @@ def normalize_trade_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "narrative": str(payload.get("narrative") or "Unknown"),
         "accumulation_score": float(payload.get("accumulation_score") or 0),
         "market_stability": float(payload.get("market_stability") or 0),
+        "onchain_context": str(payload.get("onchain_context") or ""),
+        "tier": str(payload.get("tier") or "mid"),
         "reason": str(payload.get("reason") or ""),
     }
 
@@ -279,7 +272,6 @@ def normalize_decision_payload(payload: Any) -> dict[str, Any]:
         "reasoning": reasoning,
         "disagreement": round(disagreement, 4),
     }
-    return {"final_decision": decision, "confidence": round(confidence, 4), "votes": votes, "reasoning": reasoning, "disagreement": round(disagreement, 4)}
 
 
 def _call_with_timeout(callable_obj: Any, timeout_seconds: float) -> Any:
@@ -294,3 +286,53 @@ def _call_with_timeout(callable_obj: Any, timeout_seconds: float) -> Any:
 
 def _debug_banner(message: str) -> None:
     print(message)
+
+
+def _status_enum(value: Any) -> Any:
+    """Coerce a status name string into the SDK TransactionStatus enum."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return value
+    try:
+        from genlayer_py.types import TransactionStatus
+
+        return TransactionStatus(value)
+    except Exception:
+        return value
+
+
+def _read_contract_text(
+    client: Any,
+    address: str,
+    function_name: str,
+    account: Any,
+) -> str:
+    """Read a view returning a calldata-encoded string, tolerating SDK response shapes.
+
+    genlayer_py 0.18.0's read_contract expects a plain hex result on localnet, but
+    Bradbury's gen_call returns {"data": <hex>}. The returned bytes are the calldata
+    encoding of a string, which this helper decodes back into the text value.
+    """
+    from genlayer_py.abi import calldata
+    from genlayer_py.abi.calldata.encoder import encode as calldata_encode
+    from genlayer_py.consensus.consensus_main.encoder import serialize
+    from genlayer_py.contracts.utils import make_calldata_object
+
+    encoded_args = calldata_encode(
+        make_calldata_object(method=function_name, args=[], kwargs=None)
+    )
+    serialized_data = serialize([encoded_args, b"\x00"])
+    request_params = {
+        "type": "read",
+        "to": address,
+        "from": account.address,
+        "data": serialized_data,
+        "transaction_hash_variant": "latest-nonfinal",
+    }
+    result = client.provider.make_request(method="gen_call", params=[request_params])["result"]
+    hex_data = result["data"] if isinstance(result, dict) else result
+    decoded = calldata.decode(bytes.fromhex(hex_data))
+    if isinstance(decoded, str):
+        return decoded
+    return json.dumps(decoded, default=str)

@@ -22,6 +22,9 @@ class SepoliaExecutor:
             raise ConnectionError("Unable to connect to Sepolia RPC")
 
     def simulate_test_transaction(self) -> str:
+        if settings.dry_run:
+            print("[SIMULATED] Dry run mode enabled; no real transaction was broadcast")
+            return f"0xSIMULATED_{self.private_key[:4]}_{settings.default_chain_id}"
         account = self.w3.eth.account.from_key(self.private_key)
         nonce = self.w3.eth.get_transaction_count(account.address)
 
@@ -34,5 +37,5 @@ class SepoliaExecutor:
             "chainId": settings.default_chain_id,
         }
         signed = account.sign_transaction(tx)
-        tx_hash = self.w3.eth.send_raw_transaction(signed.rawTransaction)
+        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
         return tx_hash.hex()

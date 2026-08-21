@@ -16,6 +16,7 @@ from web3 import Web3
 
 from config import settings
 from execution.trade_manager import calculate_position_size
+from storage.database import Database
 
 UNISWAP_V3_SWAP_ROUTER02 = Web3.to_checksum_address("0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45")
 SEPOLIA_WETH = Web3.to_checksum_address("0xfFf9976782d46CC05630D1f6EBAb18b2324d6B14")
@@ -137,7 +138,16 @@ def swap_eth_to_token(token_address: str, confidence: float | None = None) -> No
     if size is None:
         return None
     if settings.dry_run:
-        print("[SWAP PREVIEW] Dry run mode enabled; no transaction preview was broadcast")
+        Database().record_trade_event(
+            token_address,
+            "SIMULATED_TRADE",
+            {
+                "amount_eth": size,
+                "confidence": 0.0 if confidence is None else float(confidence),
+                "mode": "dry_run",
+            },
+        )
+        print("[SWAP PREVIEW] Dry run mode enabled; simulated trade recorded, no transaction was broadcast")
         return None
     preview = build_swap_preview(token_address, confidence)
     if preview is None:

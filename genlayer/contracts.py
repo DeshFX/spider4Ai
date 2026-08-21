@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from config import settings
-from genlayer.client import get_client
+from genlayer.client import get_client, _wallet_account
 
 CONTRACT_SOURCE = Path(__file__).resolve().parent / "contracts_src" / "trade_decision_contract.py"
 
@@ -15,18 +15,24 @@ def deploy_contract(
     contract_path: str | Path | None = None,
     constructor_args: list[Any] | None = None,
 ) -> dict[str, Any]:
-    """Return the intelligent-contract source path and deployment metadata.
+    """Deploy the intelligent contract to the Bradbury testnet.
 
-    GenLayerPY currently documents client creation plus contract read/write operations.
-    Spider4AI keeps deployment concerns explicit and separate so the returned contract
-    source can be deployed through GenLayer Studio, CLI, or a dedicated deployment script.
+    Returns deployment metadata including the deployed contract address.
     """
     path = Path(contract_path) if contract_path else CONTRACT_SOURCE
+    client = get_client()
+    account = _wallet_account()
+    address = client.deploy_contract(
+        code=path.read_text(encoding="utf-8"),
+        account=account,
+        args=constructor_args or [],
+    )
     return {
         "contract_path": str(path),
         "constructor_args": constructor_args or [],
-        "chain": "localnet",
-        "status": "ready_for_deploy",
+        "chain": "testnet_bradbury",
+        "contract_address": address,
+        "status": "deployed",
     }
 
 
@@ -41,4 +47,4 @@ def get_contract_at(address: str | None = None) -> "GenLayerContract":
 
     from genlayer.service import GenLayerContract
 
-    return GenLayerContract(client=get_client(), address=contract_address)
+    return GenLayerContract(client=get_client(), address=contract_address, account=_wallet_account())

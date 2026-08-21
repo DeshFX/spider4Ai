@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import calendar
 import sqlite3
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import typer
+from apscheduler.schedulers.background import BackgroundScheduler
 from web3 import Web3
 
 from agents.spider_agent import SpiderAgent
 from config import ConfigError, settings
+from data.cambrian_client import CambrianClient
 from execution.dex_swap import swap_eth_to_token
 from execution.sepolia_executor import SepoliaExecutor
 from genlayer.service import GenLayerService
@@ -104,6 +110,95 @@ def status_command() -> None:
         typer.echo(f"{key}: {value}")
 
 
+def _check_cambrian(client: CambrianClient | None = None) -> str:
+    client = client or CambrianClient()
+    if not client.api_key:
+        return "unconfigured (CAMBRIAN_API_KEY missing)"
+    return "connected" if client.ping() else "unreachable"
+
+
+def _check_genlayer(service: GenLayerService | None = None, cfg: Any = None) -> str:
+    cfg = cfg or settings
+    if service is not None:
+        return "configured" if service.enabled else "disabled"
+    if not cfg.genlayer_enabled:
+        return "disabled (SPIDER4AI_GENLAYER_ENABLED=false)"
+    if not cfg.genlayer_contract_address:
+        return "misconfigured (contract address missing)"
+    try:
+        from genlayer.client import get_client
+
+        get_client()
+        return "configured"
+    except Exception as exc:
+        return f"sdk_error ({exc})"
+
+
+def _check_database(database: Any = None) -> str:
+    database = database or Database()
+    try:
+        status = database.get_scan_status()
+        return f"ok ({status['coins_scanned']} coins scanned, {status['open_positions']} open)"
+    except Exception as exc:
+        return f"error ({exc})"
+
+
+def collect_health(
+    cambrian_client: CambrianClient | None = None,
+    genlayer_service: GenLayerService | None = None,
+    database: Any = None,
+    settings_obj: Any = None,
+) -> dict[str, str]:
+    """Gather a full health report: Cambrian API, GenLayer, database, and .env."""
+    cfg = settings_obj or settings
+    checks: dict[str, str] = {
+        "cambrian_api": _check_cambrian(cambrian_client),
+        "genlayer": _check_genlayer(genlayer_service, cfg),
+        "database": _check_database(database),
+    }
+    for key, value in cfg.health_snapshot().items():
+        checks[f"env.{key}"] = str(value)
+    return checks
+
+
+@app.command("healthcheck")
+def healthcheck_command() -> None:
+    """Check Cambrian API, GenLayer connection, database access, and .env status."""
+    for key, value in collect_health().items():
+        typer.echo(f"{key}: {value}")
+
+
+@app.command("cambrian-usage")
+def cambrian_usage_command() -> None:
+    """Show Cambrian API usage: today, this month, budget, and exhaustion projection."""
+    usage = Database().get_api_usage()
+    budget = settings.cambrian_monthly_budget
+    margin = settings.cambrian_safety_margin
+    threshold = int(budget * margin)
+    now = datetime.utcnow()
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    month_days_elapsed = max(now.day, 1)
+    projected_month = (usage["month_calls"] / month_days_elapsed) * days_in_month
+    if usage["today_calls"] > 0:
+        days_to_limit = max(0.0, (budget - usage["month_calls"]) / usage["today_calls"])
+        exhaustion_date = (now + timedelta(days=days_to_limit)).date().isoformat()
+    else:
+        exhaustion_date = "never (no calls today)"
+
+    typer.echo("Cambrian API usage")
+    typer.echo(f"  today calls     : {usage['today_calls']}")
+    typer.echo(f"  month calls     : {usage['month_calls']}")
+    typer.echo(f"  total calls     : {usage['total_calls']}")
+    typer.echo(f"  monthly budget  : {budget}")
+    typer.echo(f"  safety margin   : {margin:.0%} (threshold: {threshold})")
+    typer.echo(f"  projected month : {projected_month:.0f} calls")
+    typer.echo(f"  budget exhausted: {exhaustion_date}")
+    if usage["month_calls"] >= threshold:
+        typer.echo("  STATUS          : BUDGET-SAVING MODE ACTIVE")
+    else:
+        typer.echo(f"  STATUS          : OK ({budget - usage['month_calls']} calls remaining)")
+
+
 @app.command("reset-db")
 def reset_db_command(yes: bool = typer.Option(False, "--yes", help="Delete the SQLite DB without confirmation.")) -> None:
     """Reset the local SQLite database."""
@@ -139,6 +234,36 @@ def report_command() -> None:
     """Generate and save the daily report."""
     generator = ReportGenerator()
     path = generator.generate_daily_report()
+    typer.echo(f"Report generated at: {path}")
+
+
+def _run_daily_report() -> str:
+    generator = ReportGenerator()
+    return generator.generate_daily_report()
+
+
+@app.command("daily-report")
+def daily_report_command(
+    schedule: bool = typer.Option(
+        False,
+        "--schedule",
+        help="Start a 24h scheduler instead of generating the report once.",
+    ),
+) -> None:
+    """Generate the daily report markdown, or run an automatic daily scheduler."""
+    if schedule:
+        scheduler = BackgroundScheduler()
+        scheduler.add_job(_run_daily_report, "interval", hours=24, next_run_time=datetime.now())
+        scheduler.start()
+        typer.echo("Daily report scheduler started (runs every 24h). Press Ctrl+C to stop.")
+        try:
+            while True:
+                time.sleep(60)
+        except KeyboardInterrupt:
+            scheduler.shutdown()
+            typer.echo("Daily report scheduler stopped.")
+        return
+    path = _run_daily_report()
     typer.echo(f"Report generated at: {path}")
 
 

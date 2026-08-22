@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
+from genlayer_py.exceptions import GenLayerError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -65,7 +67,17 @@ def main() -> None:
 
     print(f"Contract: {CONTRACT_ADDRESS}")
     print("Submitting evaluate_trade (3 LLM validator roles vote via consensus)...")
-    result = contract.evaluate_trade(SAMPLE_PAYLOAD, timeout_seconds=180)
+    result = None
+    for attempt in range(1, 6):
+        try:
+            result = contract.evaluate_trade(SAMPLE_PAYLOAD, timeout_seconds=180)
+            break
+        except GenLayerError as exc:
+            if "rate limit" not in str(exc) or attempt == 5:
+                raise
+            wait_s = 5 * attempt
+            print(f"Node rate limited (attempt {attempt}/5), retrying in {wait_s}s...")
+            time.sleep(wait_s)
     print("evaluate_trade result:")
     print(json.dumps(result.get("decision"), indent=2, default=str))
     print("tx_hash:", result.get("transaction_hash"))

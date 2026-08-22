@@ -1,8 +1,17 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 """GenLayer intelligent contract for Spider4AI trade evaluation.
 
-Calldata on GenLayer does not support float, so all public write inputs and
-view outputs are JSON strings. Floats travel inside the JSON text.
+Design notes:
+- Calldata on GenVM does not support float, so all public write inputs and
+  view outputs are JSON strings. Floats travel inside the JSON text.
+- Each analyst persona runs as an independent Equivalence-Principle-secured
+  LLM call (leader produces the vote, validators check it against criteria).
+  The BULL/BEAR/NEUTRAL aggregation itself is application-level logic in this
+  contract, not network-level consensus across personas.
+- Fail-closed by design: if any persona returns malformed output, the whole
+  evaluate_trade call reverts (no partial commit, history untouched).
+- evaluate_trade is intentionally permissionless; anyone may submit payloads
+  and pay gas for them. History views reflect the last 10 submissions.
 """
 
 from __future__ import annotations
@@ -20,6 +29,9 @@ ROLE_WEIGHTS = {
 ROLES = tuple(ROLE_WEIGHTS.keys())
 MAX_HISTORY = 10
 VALID_DECISIONS = ("BUY", "WAIT", "SKIP", "SCAM")
+# Tie-break order: on equal weighted scores the most conservative decision
+# wins (SCAM first, BUY last).
+_CONSERVATIVE_ORDER = ("SCAM", "SKIP", "WAIT", "BUY")
 DISAGREEMENT_THRESHOLD = 0.45
 
 _EMPTY_DECISION = {
@@ -171,7 +183,7 @@ class SpiderTradeDecision(gl.Contract):
 
         winning_decision = "WAIT"
         winning_score = -1.0
-        for decision in VALID_DECISIONS:
+        for decision in _CONSERVATIVE_ORDER:
             if weighted_scores[decision] > winning_score:
                 winning_decision = decision
                 winning_score = weighted_scores[decision]

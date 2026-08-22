@@ -229,6 +229,21 @@ def dashboard_command() -> None:
     run_dashboard()
 
 
+@app.command("web")
+def web_command(
+    host: str = typer.Option("127.0.0.1", help="Bind host for the web dashboard."),
+    port: int = typer.Option(8000, help="Bind port for the web dashboard."),
+) -> None:
+    """Start the web dashboard (FastAPI) in the browser."""
+    _validate_startup()
+    import uvicorn
+
+    from web.server import app as web_app
+
+    typer.echo(f"Spider4AI web dashboard: http://{host}:{port}")
+    uvicorn.run(web_app, host=host, port=port, log_level="warning")
+
+
 @app.command("report")
 def report_command() -> None:
     """Generate and save the daily report."""

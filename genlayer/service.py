@@ -40,11 +40,10 @@ class GenLayerContract:
             ),
             timeout_seconds=timeout_seconds,
         )
-        receipt = _call_with_timeout(
-            lambda: self.client.wait_for_transaction_receipt(
-                transaction_hash=transaction_hash,
-                status=_status_enum(self.wait_status),
-            ),
+        receipt = _wait_for_receipt(
+            client=self.client,
+            transaction_hash=transaction_hash,
+            status_enum=_status_enum(self.wait_status),
             timeout_seconds=timeout_seconds,
         )
         decision = _call_with_timeout(
@@ -282,6 +281,37 @@ def _call_with_timeout(callable_obj: Any, timeout_seconds: float) -> Any:
         except FuturesTimeoutError as exc:
             future.cancel()
             raise GenLayerError(f"Timed out after {timeout_seconds} seconds") from exc
+
+
+def _wait_for_receipt(
+    client: Any,
+    transaction_hash: str,
+    status_enum: Any,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """Wait for a receipt, tolerating transitional statuses the SDK cannot decode.
+
+    genlayer_py crashes (KeyError) when a transaction passes through a status
+    number missing from its TRANSACTION_STATUS_NUMBER_TO_NAME map (e.g. '14'
+    observed on Bradbury during appeal/finalization transitions). Such states
+    are transient, so poll again until the deadline instead of failing.
+    """
+    import time as _time
+
+    deadline = _time.time() + max(timeout_seconds, 5)
+    last_error: Exception | None = None
+    while _time.time() < deadline:
+        try:
+            return client.wait_for_transaction_receipt(
+                transaction_hash=transaction_hash,
+                status=status_enum,
+                interval=5000,
+                retries=6,
+            )
+        except Exception as exc:  # noqa: BLE001 - any SDK decode/poll failure is retryable here
+            last_error = exc
+            _time.sleep(3)
+    raise GenLayerError(f"Timed out waiting for receipt {transaction_hash}: {last_error}")
 
 
 def _debug_banner(message: str) -> None:

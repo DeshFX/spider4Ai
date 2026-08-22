@@ -22,8 +22,9 @@ class Database:
 
     @contextmanager
     def _connect(self) -> Iterable[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 30000")
         try:
             yield conn
             conn.commit()
@@ -32,6 +33,7 @@ class Database:
 
     def _initialize(self) -> None:
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS market_data (
@@ -135,6 +137,7 @@ class Database:
                 ("genlayer_status", "TEXT"), ("genlayer_decision", "TEXT"), ("genlayer_confidence", "REAL"),
                 ("genlayer_reasoning", "TEXT"), ("genlayer_votes", "TEXT"), ("genlayer_disagreement", "REAL"),
                 ("genlayer_tx_hash", "TEXT"), ("decision_source", "TEXT"), ("execution_status", "TEXT"), ("execution_tx_hash", "TEXT"),
+                ("market_cap", "REAL"),
             ):
                 self._ensure_column(conn, "opportunities", column, ddl)
             for column, ddl in (
@@ -188,6 +191,7 @@ class Database:
                 "market_context": row.get("market_context"),
                 "recent_trend": row.get("recent_trend"),
                 "market_stability": row.get("market_stability"),
+                "market_cap": row.get("market_cap"),
                 "genlayer_status": row.get("genlayer_status"),
                 "genlayer_decision": row.get("genlayer_decision"),
                 "genlayer_confidence": row.get("genlayer_confidence"),
@@ -203,11 +207,11 @@ class Database:
         with self._connect() as conn:
             conn.executemany(
                 """INSERT INTO opportunities
-                (coin_id, symbol, narrative, score, accumulation_score, volume_24h, liquidity, price, reason,
+                (coin_id, symbol, narrative, score, accumulation_score, volume_24h, liquidity, price, market_cap, reason,
                  summary, risk_flags, signal_strength, source, market_context, recent_trend, market_stability,
                  genlayer_status, genlayer_decision, genlayer_confidence, genlayer_reasoning, genlayer_votes,
                  genlayer_disagreement, genlayer_tx_hash, decision_source, execution_status, execution_tx_hash, created_at)
-                VALUES (:coin_id, :symbol, :narrative, :score, :accumulation_score, :volume_24h, :liquidity, :price, :reason,
+                VALUES (:coin_id, :symbol, :narrative, :score, :accumulation_score, :volume_24h, :liquidity, :price, :market_cap, :reason,
                  :summary, :risk_flags, :signal_strength, :source, :market_context, :recent_trend, :market_stability,
                  :genlayer_status, :genlayer_decision, :genlayer_confidence, :genlayer_reasoning, :genlayer_votes,
                  :genlayer_disagreement, :genlayer_tx_hash, :decision_source, :execution_status, :execution_tx_hash, :created_at)""",
@@ -354,17 +358,44 @@ class Database:
         paused_at = datetime.fromisoformat(row["created_at"])
         return (datetime.utcnow() - paused_at).total_seconds() < pause_minutes * 60
 
-    def get_latest_opportunities(self, limit: int = 20) -> list[dict[str, Any]]:
+    def _rows_latest_per_symbol(
+        self,
+        where: str = "",
+        params: dict[str, Any] | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Latest opportunity per symbol (deduplicated across scan cycles)."""
+        sql = f"""
+            SELECT * FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY symbol ORDER BY created_at DESC, id DESC
+                ) AS _rn
+                FROM opportunities
+                {"WHERE " + where if where else ""}
+            ) WHERE _rn = 1
+            ORDER BY created_at DESC, score DESC LIMIT :limit
+        """
+        bind = dict(params or {})
+        bind["limit"] = limit
         with self._connect() as conn:
-            cur = conn.execute("SELECT * FROM opportunities ORDER BY created_at DESC, score DESC LIMIT ?", (limit,))
-            rows = [dict(row) for row in cur.fetchall()]
+            rows = [dict(r) for r in conn.execute(sql, bind).fetchall()]
         return [self._deserialize_opportunity(row) for row in rows]
 
+    def get_latest_opportunities(self, limit: int = 20) -> list[dict[str, Any]]:
+        return self._rows_latest_per_symbol(limit=limit)
+
     def get_watchlist(self, low: int = 60, high: int = 70, limit: int = 20) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            cur = conn.execute("SELECT * FROM opportunities WHERE score BETWEEN ? AND ? ORDER BY score DESC LIMIT ?", (low, high, limit))
-            rows = [dict(row) for row in cur.fetchall()]
-        return [self._deserialize_opportunity(row) for row in rows]
+        return self._rows_latest_per_symbol(
+            where="score BETWEEN :low AND :high",
+            params={"low": low, "high": high},
+            limit=limit,
+        )
+
+    def get_meme_opportunities(self, limit: int = 15) -> list[dict[str, Any]]:
+        return self._rows_latest_per_symbol(
+            where="LOWER(narrative) = 'meme'",
+            limit=limit,
+        )
 
     def get_scan_status(self) -> dict[str, Any]:
         with self._connect() as conn:

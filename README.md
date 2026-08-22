@@ -29,13 +29,13 @@ Spider4AI adalah agen AI crypto trading semi-production yang:
 4. **RugChecker** (hard-block Layer-1): block bila ada minting pasca-launch, top holder ≥20%, top10 ≥50%, atau likuiditas ditarik. Hasil hard-block masuk DB sebagai event `BLOCKED`.
 5. Filter risiko tier-aware (`risk_filter.is_safe`) dan scoring tier-aware (`scoring_engine.score`).
 6. Build decision payload termasuk `onchain_context` + `tier`, kirim ke GenLayer.
-7. GenLayer meminta 3 validator LLM (BULL / BEAR / NEUTRAL) melakukan voting via consensus.
+7. Contract menjalankan **3 panggilan LLM independen yang masing-masing diamankan Equivalence Principle** (satu per persona: BULL / BEAR / NEUTRAL); hasil ketiganya diagregasi dengan weighted voting di level contract.
 8. Simpan decision, confidence, disagreement, dan tx hash ke database.
 
 ## GenLayer intelligent contract
 
 - **Network:** Testnet **Bradbury** (chain id 4221, token GEN)
-- **Deployed contract:** `0x22D7BE081220B70b8f91f7c2fa2bD6CB00DCcf1B`
+- **Deployed contract:** `0x54ba38e9D06cE4f99a3EA94A70101014C9ae261d`
 - **Explorer:** https://explorer-bradbury.genlayer.com/
 - **SDK:** `genlayer-py` (butuh **Python 3.13+**; di Python 3.11 hanya ada package placeholder 0.0.1)
 - **Faucet:** https://testnet-faucet.genlayer.foundation
@@ -46,6 +46,14 @@ Catatan penting:
 - GenVM storage butuh tipe khusus: `DynArray`, `u256`, `@allow_storage` (bukan `list`/`int`/`dict`).
 - Calldata GenVM **tidak mendukung `float`** → semua input/output publik dikirim sebagai **JSON string**.
 - Contract mengevaluasi `onchain_context` (minting, konsentrasi holder, likuiditas) — kalau menunjukkan pola scam, validator cenderung memutuskan `SCAM`.
+
+### Desain consensus & keputusan teknis
+
+- **Equivalence Principle per persona:** tiap panggilan `gl.eq_principle.prompt_non_comparative` berjalan dengan pola leader–validator (leader menghasilkan vote, validator jaringan memeriksa output terhadap criteria). Agregasi BULL vs BEAR vs NEUTRAL adalah **logika weighted voting di level contract**, bukan konsensus lintas persona di level jaringan.
+- **Weighted voting asimetris:** BEAR 1.35× > NEUTRAL 1.15× > BULL 1.0× — downside diberi bobot lebih besar sesuai asimetri risiko trading.
+- **Tie-break konservatif:** skor seri dimenangkan urutan `SCAM > SKIP > WAIT > BUY`.
+- **Fail-closed:** satu saja persona mengembalikan JSON tidak valid → seluruh `evaluate_trade` revert, tanpa partial commit; history tidak tersentuh.
+- **Permissionless by design:** `evaluate_trade` bisa dipanggil siapa pun (pemanggil membayar gas). View history mencerminkan 10 evaluasi terakhir — diketahui sebagai limitation yang disadari.
 
 ### Deploy & test live
 
@@ -77,7 +85,7 @@ CAMBRIAN_SAFETY_MARGIN=0.9
 CAMBRIAN_CACHE_TTL_SECONDS=300
 CAMBRIAN_LIQUIDITY_VOLUME_DIVISOR=5
 SPIDER4AI_GENLAYER_ENABLED=true
-SPIDER4AI_GENLAYER_CONTRACT_ADDRESS=0x22D7BE081220B70b8f91f7c2fa2bD6CB00DCcf1B
+SPIDER4AI_GENLAYER_CONTRACT_ADDRESS=0x54ba38e9D06cE4f99a3EA94A70101014C9ae261d
 SPIDER4AI_WALLET_PRIVATE_KEY=0x...
 SPIDER4AI_DRY_RUN=true
 SPIDER4AI_ALPHA_HUNTER_ENABLED=false

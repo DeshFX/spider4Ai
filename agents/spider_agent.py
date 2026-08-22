@@ -42,6 +42,17 @@ class SpiderAgent:
         self.trade_manager = TradeManager(self.db)
         self.watchlist = [s.strip().upper() for s in settings.watchlist.split(",") if s.strip()] or DEFAULT_WATCHLIST
         self._budget_warning_sent = False
+        self.event_sink = None
+
+    def _emit(self, event: str, message: str) -> None:
+        """Push a progress event to an optional UI sink (web dashboard)."""
+        sink = self.event_sink
+        if not sink:
+            return
+        try:
+            sink(event, message)
+        except Exception:
+            pass
 
     def _budget_savings_enabled(self) -> bool:
         """True when the monthly Cambrian budget (x safety margin) is nearly exhausted.
@@ -150,6 +161,11 @@ class SpiderAgent:
         opportunity["genlayer_reasoning"] = decision.get("reasoning", result.get("reason", "No decision returned"))
         opportunity["genlayer_votes"] = decision.get("votes", [])
         opportunity["genlayer_disagreement"] = decision.get("disagreement", 0.0)
+        self._emit(
+            "genlayer",
+            f"{opportunity.get('symbol')} -> {opportunity['genlayer_decision']} @ "
+            f"{float(opportunity.get('genlayer_confidence') or 0):.2f} ({opportunity.get('decision_source')})",
+        )
         log_json(
             logger,
             logging.INFO,
@@ -177,6 +193,7 @@ class SpiderAgent:
                 "SCAM",
                 {"reason": opportunity.get("genlayer_reasoning")},
             )
+            self._emit("risk", f"{opportunity.get('symbol')} BLACKLISTED: {opportunity.get('genlayer_reasoning')}")
             log_json(
                 logger,
                 logging.WARNING,
@@ -188,6 +205,7 @@ class SpiderAgent:
             return
         if decision != "BUY":
             opportunity["execution_status"] = "deferred" if decision == "WAIT" else "skipped"
+            self._emit("exec", f"{opportunity.get('symbol')} {opportunity['execution_status']} (decision {decision})")
             return
 
         approved, reason = self.trade_manager.should_open_position(opportunity)
@@ -195,6 +213,7 @@ class SpiderAgent:
             opportunity["execution_status"] = f"blocked:{reason}"
             self.db.record_trade_event(opportunity.get("symbol", ""), "BLOCKED", {"reason": reason})
             log_json(logger, logging.INFO, "execution_blocked", symbol=opportunity.get("symbol"), reason=reason)
+            self._emit("exec", f"{opportunity.get('symbol')} diblokir trade manager: {reason}")
             return
 
         plan = self.trade_manager.compute_position_size(opportunity)
@@ -218,6 +237,10 @@ class SpiderAgent:
         else:
             opportunity["execution_status"] = "paper_position_opened"
         opportunity["execution_tx_hash"] = tx_hash
+        self._emit(
+            "exec",
+            f"{opportunity.get('symbol')} posisi dibuka [{opportunity.get('execution_status')}] size ${plan.size_usd:.2f}",
+        )
         opportunity["position_size_pct"] = plan.size_pct
         opportunity["position_size_usd"] = plan.size_usd
         opportunity["take_profit_price"] = plan.take_profit_price
@@ -235,17 +258,26 @@ class SpiderAgent:
             size_usd=plan.size_usd,
         )
 
-    def run_cycle(self) -> list[dict[str, Any]]:
-        """Execute one full market-intelligence cycle and return ranked opportunities."""
-        markets = self._fetch_markets()
+    def run_cycle(self, force_alpha: bool = False) -> list[dict[str, Any]]:
+        """Execute one full market-intelligence cycle and return ranked opportunities.
+
+        ``force_alpha`` runs this cycle through the alpha/meme hunter source
+        (social momentum + alpha tweets, FDV band filter) regardless of the
+        ``alpha_hunter_enabled`` setting.
+        """
+        markets = self._fetch_markets(force_alpha=force_alpha)
         if not markets:
             logger.warning("No market data returned from Cambrian; skipping cycle")
+            self._emit("scan", "Tidak ada data market dari Cambrian — siklus dilewati")
             return []
+        self._emit("scan", f"Mulai siklus: {len(markets)} token trending diambil")
 
         self.trade_manager.monitor_positions(markets)
         self.db.insert_market_data(markets)
 
         budget_mode = self._budget_savings_enabled()
+        if budget_mode:
+            self._emit("scan", "Budget-saving mode aktif — per-token enrichment dilewati")
         dex_batch: list[dict[str, Any]] = []
         if not budget_mode:
             for coin in markets:
@@ -277,6 +309,7 @@ class SpiderAgent:
                         reason=rug.get("reason"),
                         flags=rug.get("flags"),
                     )
+                    self._emit("risk", f"{symbol} diblokir rug checker: {rug.get('reason')}")
                     self.db.record_trade_event(symbol, "BLOCKED", {"reason": rug.get("reason")})
                     continue
 
@@ -305,6 +338,10 @@ class SpiderAgent:
                 safe, risk_reason = self.risk.is_safe(coin, dex_data, tier)
                 if not safe:
                     continue
+                self._emit(
+                    "score",
+                    f"{symbol} score {score:.1f}/100 · tier {tier} · narrative {narrative}",
+                )
 
                 risk_flags = self._build_risk_flags(coin, dex_data, market_stability)
                 wallet_activity = (
@@ -328,6 +365,7 @@ class SpiderAgent:
                     "price_change_percentage_24h": coin.get("price_change_percentage_24h", 0),
                     "tier": tier,
                     "fdv": float(coin.get("market_cap") or 0),
+                    "market_cap": float(coin.get("market_cap") or 0),
                 }
                 payload = self.build_decision_payload(
                     coin,
@@ -355,9 +393,10 @@ class SpiderAgent:
 
         opportunities.sort(key=lambda x: x["score"], reverse=True)
         self.db.insert_opportunities(opportunities)
+        self._emit("scan", f"Siklus selesai: {len(opportunities)} opportunity tersimpan")
         return opportunities
 
-    def _fetch_markets(self) -> list[dict[str, Any]]:
+    def _fetch_markets(self, force_alpha: bool = False) -> list[dict[str, Any]]:
         """Fetch active Solana tokens from Cambrian.
 
         Uses ``/solana/trending-tokens`` (returns token addresses) instead of
@@ -370,7 +409,7 @@ class SpiderAgent:
         API calls to the single trending-tokens request.
         """
         budget_mode = self._budget_savings_enabled()
-        if settings.alpha_hunter_enabled and not budget_mode:
+        if (settings.alpha_hunter_enabled or force_alpha) and not budget_mode:
             return self._fetch_alpha_markets()
         markets: list[dict[str, Any]] = []
         for coin in self.cambrian.get_trending_tokens(order_by="volume_usd_24h", limit=10):
@@ -386,7 +425,12 @@ class SpiderAgent:
         return markets
 
     def _fetch_alpha_markets(self) -> list[dict[str, Any]]:
-        """Alpha/meme hunter: momentum + alpha tweets -> FDV 10k-200k filter."""
+        """Alpha/meme hunter: X momentum ∩ active trending -> FDV band -> anti-rug gates.
+
+        Symbols hot on X are cross-matched against the trending top-100 (which
+        carries mint addresses) so most candidates need zero registry calls;
+        the cached registry resolver is only a fallback.
+        """
         candidates: dict[str, dict[str, Any]] = {}
 
         for item in self.cambrian.get_social_momentum(limit=settings.alpha_hunter_limit):
@@ -406,10 +450,32 @@ class SpiderAgent:
                     "alpha_score": item.get("alpha", 0),
                 }
 
+        if not candidates:
+            self._emit(
+                "meme",
+                "Sumber sosial kosong (momentum/tweets tidak mengembalikan data) "
+                "- kemungkinan rate limit API atau pasar sedang sepi",
+            )
+            return []
+
+        trending_map: dict[str, str] = {}
+        try:
+            for row in self.cambrian.get_trending_tokens(
+                order_by="price_change_percentage", limit=100
+            ):
+                if row.get("id"):
+                    trending_map[str(row.get("symbol", "")).upper()] = str(row["id"])
+        except Exception:
+            pass
+
         markets: list[dict[str, Any]] = []
         for symbol, meta in candidates.items():
-            address = self.cambrian.resolve_symbol_to_address(symbol)
+            address = trending_map.get(symbol)
+            source = "trending-cross-match" if address else "registry-cache"
             if not address:
+                address = self.cambrian.resolve_symbol_to_address(symbol)
+            if not address:
+                self._emit("meme", f"{symbol} skip: address tidak ditemukan")
                 continue
             details = self.cambrian.get_token_details(address)
             if not details:
@@ -417,6 +483,19 @@ class SpiderAgent:
             fdv = details.get("fdv", 0)
             if fdv < settings.alpha_min_fdv or fdv > settings.tier_alpha_max_fdv:
                 continue
+            self._emit(
+                "meme",
+                f"{symbol} lolos FDV band ({float(fdv):,.0f}) via {source}",
+            )
+
+            security = self.cambrian.get_token_security(address)
+            volume = float(details.get("volume_24h") or 0)
+            passed, gate_reason = self._alpha_gates(fdv, volume, security)
+            if not passed:
+                self._emit("risk", f"{symbol} gagal gerbang meme: {gate_reason}")
+                continue
+            self._emit("meme", f"{symbol} lolos semua gerbang anti-rug")
+
             markets.append(
                 {
                     "id": address,
@@ -438,6 +517,29 @@ class SpiderAgent:
             if len(markets) >= settings.alpha_hunter_limit:
                 break
         return markets
+
+    @staticmethod
+    def _alpha_gates(fdv: float, volume_24h: float, security: dict[str, Any]) -> tuple[bool, str]:
+        """Deterministic anti-wash/anti-rug gates before GenLayer evaluation."""
+        top10 = float(security.get("top10_pct") or 0)
+        holders = int(security.get("holder_count") or 0)
+        uniqueness = float(security.get("tx_uniqueness_ratio") or 1)
+        ratio = volume_24h / max(float(fdv), 1)
+
+        failed: list[str] = []
+        if top10 > settings.alpha_gate_top10_max_pct:
+            failed.append(f"top10 {top10:.1f}% > {settings.alpha_gate_top10_max_pct}%")
+        if holders < settings.alpha_gate_min_holders:
+            failed.append(f"holders {holders} < {settings.alpha_gate_min_holders}")
+        if ratio > settings.alpha_gate_max_volume_fdv_ratio:
+            failed.append(
+                f"vol/fdv {ratio:.0f}x > {settings.alpha_gate_max_volume_fdv_ratio:.0f}x (curiga wash trade)"
+            )
+        if uniqueness < settings.alpha_gate_min_tx_uniqueness:
+            failed.append(
+                f"tx uniqueness {uniqueness:.2f} < {settings.alpha_gate_min_tx_uniqueness} (dompet sama berulang)"
+            )
+        return (not failed), "; ".join(failed)
 
     def _build_recent_trend(self, coin: dict[str, Any]) -> str:
         change = float(coin.get("price_change_percentage_24h") or 0)

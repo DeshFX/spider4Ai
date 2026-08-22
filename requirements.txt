@@ -7,3 +7,5 @@ typer==0.12.5
 web3==7.16.0
 genlayer_py
 python-dotenv==1.0.1
+fastapi==0.141.1
+uvicorn==0.52.4

@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spider4AI Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149; --cyan: #58a6ff; --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    font-family: "Segoe UI", system-ui, sans-serif; padding: 20px;
+  }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
+  h1 { font-size: 22px; }
+  h1 span { color: var(--cyan); }
+  .clock { color: var(--muted); font-size: 12px; font-family: Consolas, monospace; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 14px; cursor: pointer; font-size: 13px; font-weight: 600;
+    transition: border-color .15s, color .15s;
+  }
+  button:hover:not(:disabled) { border-color: var(--cyan); color: var(--cyan); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.danger:hover:not(:disabled) { border-color: var(--red); color: var(--red); }
+  #dry_run_btn.live { border-color: var(--red); color: var(--red); animation: pulse 2s infinite; }
+  @keyframes pulse { 50% { opacity: .6; } }
+  #error_banner {
+    display: none; background: rgba(248,81,73,.12); border: 1px solid var(--red);
+    color: var(--red); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; font-size: 13px;
+  }
+  #job_banner {
+    display: none; background: rgba(88,166,255,.1); border: 1px solid var(--cyan);
+    color: var(--cyan); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; font-size: 13px;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
+  .panel h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); padding: 10px 14px; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .panel h2 .count { color: var(--cyan); font-family: Consolas, monospace; }
+  .scroll { overflow-y: auto; max-height: 340px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px 12px; text-align: left; white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; position: sticky; top: 0; background: var(--panel); }
+  tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  th.num { text-align: right; }
+  .sym b { font-size: 13.5px; }
+  .narr { color: var(--purple); font-size: 11.5px; }
+  .badge { padding: 2px 9px; border-radius: 10px; font-size: 11px; font-weight: 700; display: inline-block; }
+  .BUY   { background: rgba(63,185,80,.15);  color: var(--green); }
+  .WAIT  { background: rgba(210,153,34,.15); color: var(--yellow); }
+  .SCAM  { background: rgba(248,81,73,.15);  color: var(--red); }
+  .status-list { list-style: none; font-size: 13px; }
+  .status-list li { display: flex; justify-content: space-between; gap: 10px; padding: 7.5px 14px; border-bottom: 1px solid rgba(255,255,255,.04); }
+  .status-list li:last-child { border-bottom: none; }
+  .status-list .k { color: var(--muted); }
+  .status-list .v { font-weight: 600; text-align: right; overflow: hidden; text-overflow: ellipsis; }
+  .v.on { color: var(--green); } .v.off { color: var(--muted); } .v.warn { color: var(--yellow); }
+  .bar-wrap { background: rgba(255,255,255,.08); border-radius: 4px; height: 8px; margin: 4px 14px 12px; overflow: hidden; }
+  .bar { height: 100%; background: linear-gradient(90deg, var(--green), var(--yellow)); width: 0; transition: width .5s; }
+  .log { overflow-y: auto; height: 300px; font-size: 13.5px; }
+  .log div { padding: 9px 16px; border-bottom: 1px solid rgba(255,255,255,.04); display: flex; gap: 12px; align-items: baseline; }
+  .log .t { color: var(--muted); font-family: Consolas, monospace; min-width: 66px; }
+  .log .s { min-width: 30%; font-weight: 600; }
+  .log .ok { color: var(--green); } .log .fail { color: var(--red); } .log .run { color: var(--cyan); }
+  .empty { color: var(--muted); padding: 16px !important; font-style: italic; text-align: center; }
+  footer { margin-top: 16px; color: var(--muted); font-size: 12px; text-align: center; }
+  button.mini { padding: 3px 10px; font-size: 11px; margin-left: auto; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+  .tweets { overflow-y: auto; height: 320px; border-left: 1px solid var(--border); }
+  .tweet { padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,.04); font-size: 12.5px; }
+  .tweet .head { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; flex-wrap: wrap; }
+  .tweet .author { color: var(--cyan); font-weight: 700; }
+  .tweet .txt { line-height: 1.45; white-space: normal; word-break: break-word; opacity: .88; }
+  .chip { font-size: 10.5px; padding: 1px 8px; border-radius: 8px; background: rgba(188,140,255,.15); color: var(--purple); font-weight: 600; }
+  .chip.hi { background: rgba(63,185,80,.15); color: var(--green); }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>🕷️ <span>Spider4AI</span> Web Dashboard</h1>
+    <span class="clock" id="clock"></span>
+  </div>
+  <div class="controls">
+    <button id="scan_btn" onclick="post('/api/scan')">▶ Scan Now</button>
+    <button id="scan_meme_btn" onclick="post('/api/scan-meme')">🐕 Scan Meme</button>
+    <button id="auto_btn" onclick="post('/api/auto-scan')">⏱ Auto Scan</button>
+    <button id="report_btn" onclick="post('/api/report')">📄 Report</button>
+    <button id="trade_btn" onclick="post('/api/test-trade')">🧪 Test Trade</button>
+    <button id="dry_run_btn" class="danger" onclick="toggleDryRun()">🛡 DRY_RUN</button>
+  </div>
+</header>
+
+<div id="error_banner">⚠️ <span id="error_text"></span></div>
+<div id="job_banner">⏳ <span id="job_text"></span></div>
+
+<div class="grid">
+  <div class="panel" style="grid-column: 1 / -1;">
+    <h2>Top Opportunities <span class="count" id="top_count"></span></h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>#</th><th>Coin</th><th>Decision</th><th class="num">Conf.</th><th class="num">Score</th><th class="num">Price</th><th class="num">FDV/MCap</th><th class="num">Liquidity</th><th>Narrative</th><th>Source</th><th>Scan</th></tr></thead>
+        <tbody id="top_body"><tr><td colspan="11" class="empty">Memuat…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Watchlist (60–70) <span class="count" id="watch_count"></span></h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Coin</th><th>Decision</th><th class="num">Conf.</th></tr></thead>
+        <tbody id="watch_body"><tr><td colspan="3" class="empty">Memuat…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>🐕 Meme Radar <span class="count" id="meme_count"></span></h2>
+    <div class="scroll" style="max-height: 340px;">
+      <table>
+        <thead><tr><th>Coin</th><th>Decision</th><th class="num">Conf.</th><th class="num">Price</th><th class="num">Vol 24j</th><th>Status</th><th>Scan</th></tr></thead>
+        <tbody id="meme_body"><tr><td colspan="7" class="empty">Memuat…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>System Status</h2>
+    <ul class="status-list" id="status_list"></ul>
+    <div class="bar-wrap"><div class="bar" id="budget_bar"></div></div>
+  </div>
+</div>
+
+<div class="panel" style="margin-top: 14px;">
+  <h2>
+    <span>🎯 Alpha Radar <span class="count" id="alpha_meta"></span></span>
+    <button class="mini" onclick="post('/api/alpha/refresh')">🔄 Refresh</button>
+  </h2>
+  <div class="two-col">
+    <div class="scroll" style="max-height: 320px;">
+      <table>
+        <thead><tr><th>Token</th><th class="num">Momentum</th><th class="num">Velocity</th><th class="num">Sentiment</th><th class="num">Reach</th></tr></thead>
+        <tbody id="momentum_body"><tr><td colspan="5" class="empty">Memuat…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="tweets" id="tweets_box"><div class="empty">Memuat…</div></div>
+  </div>
+</div>
+
+<div class="panel" style="margin-top: 14px;">
+  <h2>Action Log <span class="count" id="log_count"></span></h2>
+  <div class="log" id="log_box"><div class="empty">Belum ada aksi.</div></div>
+</div>
+
+<footer>Auto-refresh 8 detik · Spider4AI GenLayer Edition · <span id="conn">terhubung</span></footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let dryRun = null;
+let wasBusy = false;
+
+function badge(decision) {
+  const d = (decision || "WAIT").toUpperCase();
+  return `<span class="badge ${["BUY","WAIT","SCAM"].includes(d) ? d : "WAIT"}">${d}</span>`;
+}
+function fmtUsd(v) {
+  if (v === null || v === undefined || isNaN(+v)) return "-";
+  const n = +v;
+  if (n >= 1e9) return "$" + (n/1e9).toFixed(2) + "B";
+  if (n >= 1e6) return "$" + (n/1e6).toFixed(2) + "M";
+  if (n >= 1e3) return "$" + (n/1e3).toFixed(1) + "K";
+  if (n >= 1) return "$" + n.toFixed(2);
+  return "$" + n.toPrecision(3);
+}
+
+function fmtTime(iso) {
+  if (!iso) return "-";
+  const d = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z");
+  if (isNaN(d)) return "-";
+  return d.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+}
+async function fetchJSON(url, opts = {}, timeoutMs = 15000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...opts, signal: ctrl.signal });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    return data;
+  } finally { clearTimeout(timer); }
+}
+
+async function post(url, body) {
+  setBusy(true);
+  try {
+    await fetchJSON(url, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: body ? JSON.stringify(body) : undefined,
+    }, 30000);
+  } catch (e) { showError("Aksi gagal: " + e.message); }
+  refresh();
+}
+
+function toggleDryRun() {
+  if (dryRun === null) return;
+  post("/api/dry-run", { enabled: !dryRun });
+}
+
+function setBusy(busy) {
+  ["scan_btn", "scan_meme_btn", "auto_btn", "report_btn", "trade_btn", "dry_run_btn"]
+    .forEach(id => $(id).disabled = busy);
+}
+
+function showError(msg) {
+  $("error_text").textContent = msg;
+  $("error_banner").style.display = "block";
+  $("conn").textContent = "putus?";
+}
+function clearError() {
+  $("error_banner").style.display = "none";
+  $("conn").textContent = "terhubung";
+}
+
+function renderAlpha(data) {
+  if (!data) return;
+  $("momentum_body").innerHTML = (data.momentum || []).length
+    ? data.momentum.map(m => {
+        const s = +m.sentiment || 0;
+        return `<tr>
+          <td class="sym"><b>${m.symbol}</b></td>
+          <td class="num">${(+m.momentum_score || 0).toFixed(1)}</td>
+          <td class="num">${(+m.tweet_velocity || 0).toFixed(1)}</td>
+          <td class="num ${s >= 0 ? "pos" : "neg"}">${s.toFixed(2)}</td>
+          <td class="num">${fmtUsd(m.total_reach)}</td></tr>`;
+      }).join("")
+    : '<tr><td colspan="5" class="empty">Tidak ada data momentum.</td></tr>';
+
+  $("tweets_box").innerHTML = (data.tweets || []).length
+    ? data.tweets.map(t => {
+        const a = +t.alpha || 0;
+        return `<div class="tweet">
+          <div class="head">
+            <span class="author">@${t.author || "anon"}</span>
+            <span class="badge WAIT">${t.symbol}</span>
+            <span class="chip ${a >= 7 ? "hi" : ""}">alpha ${a.toFixed(1)}</span>
+            <span class="chip">legit ${(+(t.legitimacy || 0)).toFixed(2)}</span>
+          </div>
+          <div class="txt">${(t.text || "").replace(/</g, "&lt;")}</div>
+        </div>`;
+      }).join("")
+    : '<div class="empty">Tidak ada tweet alpha.</div>';
+
+  $("alpha_meta").textContent =
+    `${(data.momentum || []).length} momentum · ${(data.tweets || []).length} tweet · ${data.generated_at}${data.cached ? " (cache)" : ""}`;
+}
+
+async function refresh() {
+  try {
+    const [opps, watch, status, logs] = await Promise.all([
+      fetchJSON("/api/opportunities"),
+      fetchJSON("/api/watchlist"),
+      fetchJSON("/api/status"),
+      fetchJSON("/api/logs"),
+    ]);
+    clearError();
+
+    $("top_count").textContent = opps.length + " token";
+    $("watch_count").textContent = (watch.tokens || []).length + " token";
+    $("top_body").innerHTML = opps.length
+      ? opps.map((c, i) => `<tr>
+          <td class="num">${i+1}</td>
+          <td class="sym"><b>${c.symbol}</b></td>
+          <td>${badge(c.genlayer_decision)}</td>
+          <td class="num">${(+c.genlayer_confidence || 0).toFixed(2)}</td>
+          <td class="num">${(+c.score).toFixed(1)}</td>
+          <td class="num">${fmtUsd(c.price)}</td>
+          <td class="num">${fmtUsd(c.market_cap ?? c.volume_24h)}</td>
+          <td class="num">${fmtUsd(c.liquidity)}</td>
+          <td class="narr">${c.narrative ?? "-"}</td>
+          <td style="color:var(--muted)">${c.decision_source ?? "-"}</td>
+          <td class="num" style="color:var(--muted)">${fmtTime(c.created_at)}</td></tr>`).join("")
+      : '<tr><td colspan="11" class="empty">Belum ada data — klik ▶ Scan Now.</td></tr>';
+
+    $("watch_body").innerHTML = (watch.tokens || []).length
+      ? watch.tokens.map(c => `<tr>
+          <td class="sym"><b>${c.symbol}</b></td>
+          <td>${badge(c.genlayer_decision)}</td>
+          <td class="num">${(+c.genlayer_confidence || 0).toFixed(2)}</td></tr>`).join("")
+      : '<tr><td colspan="3" class="empty">Kosong.</td></tr>';
+
+    const meme = watch.meme || [];
+    const mCount = document.getElementById("meme_count");
+    if (mCount) {
+      mCount.textContent = meme.length + " meme" + (watch.alpha_hunter_enabled ? " · hunter ON" : "");
+      $("meme_body").innerHTML = meme.length
+        ? meme.map(c => {
+            const st = c.execution_status || "-";
+            const stCls = st.startsWith("dry_run") || st === "submitted" || st === "paper_position_opened" ? "pos"
+              : st.startsWith("blocked") || st === "blacklisted" ? "neg" : "";
+            return `<tr>
+              <td class="sym"><b>${c.symbol}</b><div class="narr">${c.narrative ?? ""}</div></td>
+              <td>${badge(c.genlayer_decision)}</td>
+              <td class="num">${(+c.genlayer_confidence || 0).toFixed(2)}</td>
+              <td class="num">${fmtUsd(c.price)}</td>
+              <td class="num">${fmtUsd(c.volume_24h)}</td>
+              <td style="color:var(--muted)" class="${stCls}">${st}</td>
+              <td class="num" style="color:var(--muted)">${fmtTime(c.created_at)}</td></tr>`;
+          }).join("")
+        : '<tr><td colspan="7" class="empty">Belum ada token Meme - jalankan Scan.</td></tr>';
+    }
+
+    dryRun = !!status.dry_run;
+    const busy = !!status.current_job;
+    setBusy(busy);
+    if (wasBusy && !busy) setTimeout(refresh, 1500);
+    wasBusy = busy;
+    if (busy) {
+      $("job_text").textContent =
+        `${status.current_job} berjalan sejak ${status.job_started_at} — hasil muncul di Action Log.`;
+      $("job_banner").style.display = "block";
+    } else $("job_banner").style.display = "none";
+
+    $("auto_btn").textContent = status.auto_scan ? "⏱ Auto: ON" : "⏱ Auto Scan";
+    const dryBtn = $("dry_run_btn");
+    dryBtn.classList.toggle("live", !dryRun);
+    dryBtn.textContent = dryRun ? "🛡 DRY_RUN: ON" : "⚠ LIVE TRADING";
+
+    const pct = Math.min(100, Math.round(status.cambrian_month / Math.max(1, status.cambrian_budget) * 100));
+    $("budget_bar").style.width = pct + "%";
+    $("budget_bar").style.background = pct > 80 ? "var(--red)" : pct > 50 ? "var(--yellow)" : "var(--green)";
+
+    const contract = status.genlayer_contract || "-";
+    const rows = [
+      ["Coins scanned", String(status.coins_scanned)],
+      ["Narratives", String(status.narratives_detected)],
+      ["Blacklisted", String(status.blacklisted_tokens)],
+      ["Open positions", String(status.open_positions)],
+      ["Cambrian bulan ini", `${status.cambrian_month}/${status.cambrian_budget} (${pct}%)`],
+      ["GenLayer contract", contract.length > 14 ? contract.slice(0, 8) + "…" + contract.slice(-4) : contract],
+      ["Auto scan", status.auto_scan ? "ON" : "OFF"],
+      ["Last update DB", status.last_update ?? "-"],
+      ["Local time", status.local_time],
+    ];
+    $("status_list").innerHTML = rows.map(([k, v]) =>
+      `<li><span class="k">${k}</span><span class="v">${v}</span></li>`).join("");
+
+    $("log_box").innerHTML = logs.length
+      ? logs.map(l => {
+          const cls = l.status.startsWith("done") ? "ok" : l.status.startsWith("failed") ? "fail" : l.status === "running" ? "run" : "";
+          return `<div><span class="t">${l.time}</span><span class="s">${l.action}</span><span class="${cls}">${l.status}</span></div>`;
+        }).join("")
+      : '<div class="empty">Belum ada aksi.</div>';
+    $("log_count").textContent = logs.length + " entri";
+  } catch (e) {
+    showError("Gagal memuat data: " + e.message + " — cek server masih jalan.");
+  }
+}
+
+fetchJSON("/api/alpha").then(renderAlpha).catch(() => {});
+
+$("clock").textContent = new Date().toLocaleTimeString("id-ID");
+setInterval(() => $("clock").textContent = new Date().toLocaleTimeString("id-ID"), 1000);
+
+refresh();
+setInterval(refresh, 8000);
+setInterval(() => fetchJSON("/api/alpha").then(renderAlpha).catch(() => {}), 30000);
+</script>
+</body>
+</html>

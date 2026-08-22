@@ -414,6 +414,53 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class AlphaGatesTests(unittest.TestCase):
+    def test_clean_token_passes_all_gates(self) -> None:
+        from agents.spider_agent import SpiderAgent
+
+        ok, reason = SpiderAgent._alpha_gates(
+            fdv=50_000,
+            volume_24h=500_000,
+            security={"top10_pct": 22.0, "holder_count": 350, "tx_uniqueness_ratio": 0.55},
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_wash_trade_volume_ratio_blocked(self) -> None:
+        from agents.spider_agent import SpiderAgent
+
+        ok, reason = SpiderAgent._alpha_gates(
+            fdv=20_000,
+            volume_24h=2_000_000,
+            security={"top10_pct": 10.0, "holder_count": 500, "tx_uniqueness_ratio": 0.6},
+        )
+        self.assertFalse(ok)
+        self.assertIn("wash trade", reason)
+
+    def test_low_tx_uniqueness_blocked(self) -> None:
+        from agents.spider_agent import SpiderAgent
+
+        ok, reason = SpiderAgent._alpha_gates(
+            fdv=50_000,
+            volume_24h=400_000,
+            security={"top10_pct": 15.0, "holder_count": 300, "tx_uniqueness_ratio": 0.05},
+        )
+        self.assertFalse(ok)
+        self.assertIn("uniqueness", reason)
+
+    def test_holder_concentration_and_count_blocked(self) -> None:
+        from agents.spider_agent import SpiderAgent
+
+        ok, reason = SpiderAgent._alpha_gates(
+            fdv=80_000,
+            volume_24h=100_000,
+            security={"top10_pct": 85.0, "holder_count": 12, "tx_uniqueness_ratio": 0.7},
+        )
+        self.assertFalse(ok)
+        self.assertIn("top10", reason)
+        self.assertIn("holders", reason)
+
+
 class TradeManagerTests(unittest.TestCase):
     def test_position_sizing_respects_bounds(self) -> None:
         with _tmp_db_file() as tmp:

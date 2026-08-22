@@ -22,10 +22,11 @@ SOL_TOKEN_ADDRESS = "So11111111111111111111111111111111111111112"
 CACHE_TTL_SECONDS_DEFAULT = 300
 
 CACHEABLE_ENDPOINTS = {
-    "solana/price-volume/single",
+    "solana/price-volume",
     "solana/token-details",
     "solana/tokens/security",
     "solana/tokens/holders",
+    "solana/token-mint-burn-transactions",
     "solana/token-pool-search",
     "solana/orca/pool",
     "deep42/social-data/token-analysis",
@@ -61,6 +62,8 @@ class CambrianClient:
         self._cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         self.call_count = 0
         self.cache_hits = 0
+        self._registry_map: dict[str, str] | None = None
+        self._registry_at: float = 0.0
 
     def _db(self) -> Any:
         if self._db_instance is None:
@@ -290,14 +293,16 @@ class CambrianClient:
     def get_price_trend(self, token: str) -> dict[str, Any]:
         """Price / market-cap / volume trend for a token (replaces CoinGecko).
 
-        Backed by ``/solana/price-volume/single``, which expects a token mint
-        address. ``stability`` and ``trend`` are derived locally.
+        Backed by ``/solana/price-volume`` (multi-token variant; the old
+        ``price-volume/single`` endpoint was removed), which expects a
+        comma-separated list of token mint addresses. ``stability`` and
+        ``trend`` are derived locally.
         """
         if not token:
             return {}
         data = self._get(
-            "solana/price-volume/single",
-            {"token_address": token, "timeframe": "24h"},
+            "solana/price-volume",
+            {"token_addresses": token, "timeframe": "24h"},
         )
         if not data:
             return {}
@@ -419,44 +424,54 @@ class CambrianClient:
     def get_holders(self, token_address: str, limit: int = 20) -> list[dict[str, Any]]:
         """Top holders for a token, largest balance first.
 
-        Backed by ``/solana/tokens/holders``. Used to detect whale/dev
-        concentration and sudden supply control changes.
+        Backed by ``/solana/tokens/holders``. The API renamed its parameter:
+        the token mint address must now be sent as ``program_id``. Used to
+        detect whale/dev concentration and sudden supply control changes.
         """
         if not token_address:
             return []
-        rows = self._get_rows("solana/tokens/holders", {"token_address": token_address, "limit": limit})
+        rows = self._get_rows("solana/tokens/holders", {"program_id": token_address, "limit": limit})
         holders: list[dict[str, Any]] = []
         for data in rows:
             holders.append(
                 {
-                    "address": str(data.get("ownerAddress") or data.get("address") or ""),
-                    "balance": _to_float(data.get("balance") or data.get("balanceRaw")),
+                    "address": str(data.get("account") or data.get("ownerAddress") or data.get("address") or ""),
+                    # balanceUi shares units with total_supply from /tokens/security,
+                    # so RugChecker can compute holder percentage from it.
+                    "balance": _to_float(data.get("balanceUi") or data.get("balance")),
                     "balance_usd": _to_float(data.get("balanceUSD")),
                     "pct": _to_float(data.get("percentage") or data.get("share")),
                 }
             )
         return holders
 
-    def get_mint_burn(self, token_address: str, limit: int = 20) -> list[dict[str, Any]]:
+    def get_mint_burn(self, token_address: str, limit: int = 20, lookback_days: int = 30) -> list[dict[str, Any]]:
         """Recent mint/burn supply changes (rug-dilution audit trail).
 
-        Backed by ``/solana/token-mint-burn-transactions``. A post-launch mint
-        of new supply is a strong rugpull signal.
+        Backed by ``/solana/token-mint-burn-transactions``. The API now
+        requires a ``after_time``/``before_time`` unix-timestamp window.
+        A post-launch mint of new supply is a strong rugpull signal.
         """
         if not token_address:
             return []
+        now = int(time.time())
         rows = self._get_rows(
             "solana/token-mint-burn-transactions",
-            {"token_address": token_address, "limit": limit},
+            {
+                "token_address": token_address,
+                "limit": limit,
+                "after_time": now - lookback_days * 24 * 3600,
+                "before_time": now,
+            },
         )
         events: list[dict[str, Any]] = []
         for data in rows:
             events.append(
                 {
-                    "type": str(data.get("type") or data.get("eventType") or "").lower(),
+                    "type": str(data.get("operationType") or data.get("type") or data.get("eventType") or "").lower(),
                     "amount": _to_float(data.get("amount")),
-                    "signer": str(data.get("signer") or data.get("fromAddress") or ""),
-                    "timestamp": str(data.get("timestamp") or data.get("blockTime") or ""),
+                    "signer": str(data.get("authority") or data.get("signer") or ""),
+                    "timestamp": str(data.get("blockTime") or data.get("timestamp") or ""),
                 }
             )
         return events
@@ -575,24 +590,30 @@ class CambrianClient:
     ) -> str:
         """Resolve a token symbol to its Solana mint address via /solana/tokens.
 
-        Scans the registry in pages until the symbol is found or ``max_scan``
-        tokens have been checked. Returns ``""`` when unresolved.
+        The full registry is fetched once and cached in memory for
+        ``registry_cache_ttl_hours``; subsequent lookups are instant local
+        dict hits with zero API cost.
         """
         symbol = str(symbol or "").strip().upper()
         if not symbol:
             return ""
-        seen = 0
-        offset = 0
-        while seen < max_scan:
-            page = self.list_tokens(limit=page_size, offset=offset)
-            if not page:
-                break
-            for token in page:
-                seen += 1
-                if str(token.get("symbol") or "").upper() == symbol:
-                    return token.get("address") or ""
-            offset += len(page)
-        return ""
+        now = time.time()
+        ttl_hours = _to_float(getattr(settings, "registry_cache_ttl_hours", 6), 6) or 6
+        if self._registry_map is None or now - self._registry_at > ttl_hours * 3600:
+            registry: dict[str, str] = {}
+            offset = 0
+            while len(registry) < max_scan:
+                page = self.list_tokens(limit=page_size, offset=offset)
+                if not page:
+                    break
+                for token in page:
+                    sym = str(token.get("symbol") or "").upper()
+                    if sym and sym not in registry:
+                        registry[sym] = token.get("address") or ""
+                offset += len(page)
+            self._registry_map = registry
+            self._registry_at = now
+        return self._registry_map.get(symbol, "")
 
     def get_liquidity_volume(self, pair_or_pool: str) -> dict[str, Any]:
         """Liquidity / volume context for a token (replaces Dexscreener).

@@ -156,16 +156,33 @@ class SpiderAgent:
         opportunity["genlayer_tx_hash"] = result.get("transaction_hash")
         opportunity["decision_source"] = result.get("decision_source", "unknown")
         decision = result.get("decision") or {}
-        opportunity["genlayer_decision"] = decision.get("final_decision", "WAIT")
-        opportunity["genlayer_confidence"] = decision.get("confidence", 0.0)
-        opportunity["genlayer_reasoning"] = decision.get("reasoning", result.get("reason", "No decision returned"))
-        opportunity["genlayer_votes"] = decision.get("votes", [])
-        opportunity["genlayer_disagreement"] = decision.get("disagreement", 0.0)
-        self._emit(
-            "genlayer",
-            f"{opportunity.get('symbol')} -> {opportunity['genlayer_decision']} @ "
-            f"{float(opportunity.get('genlayer_confidence') or 0):.2f} ({opportunity.get('decision_source')})",
-        )
+        if decision:
+            opportunity["genlayer_decision"] = decision.get("final_decision", "WAIT")
+            opportunity["genlayer_confidence"] = decision.get("confidence", 0.0)
+            opportunity["genlayer_reasoning"] = decision.get(
+                "reasoning", result.get("reason", "No decision returned")
+            )
+            opportunity["genlayer_votes"] = decision.get("votes", [])
+            opportunity["genlayer_disagreement"] = decision.get("disagreement", 0.0)
+            self._emit(
+                "genlayer",
+                f"{opportunity.get('symbol')} -> {opportunity['genlayer_decision']} @ "
+                f"{float(opportunity.get('genlayer_confidence') or 0):.2f} ({opportunity.get('decision_source')})",
+            )
+        else:
+            # GenLayer-only policy: no fallback engine exists anymore.
+            opportunity["genlayer_decision"] = "NONE"
+            opportunity["genlayer_confidence"] = 0.0
+            opportunity["genlayer_reasoning"] = result.get(
+                "reason", "GenLayer unavailable - no fallback configured"
+            )
+            opportunity["genlayer_votes"] = []
+            opportunity["genlayer_disagreement"] = 0.0
+            self._emit(
+                "genlayer",
+                f"{opportunity.get('symbol')} -> TANPA KEPUTUSAN "
+                f"({opportunity.get('decision_source')}): {result.get('reason', '')[:120]}",
+            )
         log_json(
             logger,
             logging.INFO,
@@ -177,6 +194,13 @@ class SpiderAgent:
 
     def _execute_decision(self, opportunity: dict[str, Any]) -> None:
         decision = opportunity.get("genlayer_decision")
+        if decision in ("", "NONE"):
+            opportunity["execution_status"] = "no_decision"
+            self._emit(
+                "exec",
+                f"{opportunity.get('symbol')} dilewati: tidak ada keputusan GenLayer",
+            )
+            return
         if decision == "SCAM":
             opportunity["execution_status"] = "blacklisted"
             opportunity["risk_flags"] = list(

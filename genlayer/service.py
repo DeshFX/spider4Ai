@@ -1,4 +1,11 @@
-"""Off-chain service layer for Spider4AI -> GenLayer intelligent contract calls."""
+"""Off-chain service layer for Spider4AI -> GenLayer intelligent contract calls.
+
+Decision policy: GenLayer is the ONLY decision source. When the contract is
+unreachable or fails after all retries, send_decision returns a ``status``
+of ``"disabled"``/``"error"`` with NO decision attached - callers must treat
+the opportunity as undecided and skip execution. There is deliberately no
+local AI / heuristic fallback.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +14,6 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Any
-
-import requests
 
 from config import settings
 from genlayer.contracts import get_contract_at
@@ -59,95 +64,29 @@ class GenLayerContract:
         return {"decision": normalized, "transaction_hash": transaction_hash, "receipt": receipt}
 
 
-class LocalFallbackDecisionEngine:
-    def __init__(self) -> None:
-        self.ollama_url = settings.ollama_base_url.rstrip("/")
-        self.model = settings.ollama_model
-        self.timeout_seconds = settings.genlayer_fallback_timeout_seconds
-
-    def decide(self, payload: dict[str, Any], reason: str) -> dict[str, Any]:
-        prompt = build_decision_prompt(payload)
-        llm_result = self._ollama_decision(prompt)
-        if llm_result:
-            _debug_banner("[FALLBACK MODE] local_ai")
-            log_json(
-                logger,
-                logging.WARNING,
-                "decision_fallback",
-                path="local_ai",
-                token=payload.get("token"),
-                reason=reason,
-                decision=llm_result,
-            )
-            return {
-                "status": "fallback",
-                "decision": llm_result,
-                "decision_source": "local_ai",
-                "reason": reason,
-            }
-        heuristic = self._heuristic_decision(payload)
-        _debug_banner("[FALLBACK MODE] heuristic")
-        log_json(
-            logger,
-            logging.WARNING,
-            "decision_fallback",
-            path="heuristic",
-            token=payload.get("token"),
-            reason=reason,
-            decision=heuristic,
-        )
-        return {
-            "status": "fallback",
-            "decision": heuristic,
-            "decision_source": "heuristic",
-            "reason": reason,
-        }
-
-    def _ollama_decision(self, prompt: str) -> dict[str, Any] | None:
-        try:
-            response = requests.post(
-                f"{self.ollama_url}/api/generate",
-                json={"model": self.model, "prompt": prompt, "stream": False, "format": "json"},
-                timeout=self.timeout_seconds,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            return normalize_decision_payload(json.loads(payload.get("response", "{}")))
-        except Exception:
-            return None
-
-    def _heuristic_decision(self, payload: dict[str, Any]) -> dict[str, Any]:
-        risk_flags = [str(flag).lower() for flag in payload.get("risk_flags", [])]
-        signal_strength = float(payload.get("signal_strength") or 0)
-        if any("scam" in flag or "rug" in flag or "honeypot" in flag for flag in risk_flags):
-            return {"final_decision": "SCAM", "confidence": 0.9, "votes": [], "reasoning": "Heuristic scam protection triggered.", "disagreement": 0.0}
-        if len(risk_flags) >= 3:
-            return {"final_decision": "SKIP", "confidence": 0.65, "votes": [], "reasoning": "Heuristic risk filter rejected trade.", "disagreement": 0.15}
-        if signal_strength >= 0.75:
-            return {"final_decision": "BUY", "confidence": 0.72, "votes": [], "reasoning": "Heuristic momentum and conviction threshold passed.", "disagreement": 0.1}
-        if signal_strength >= 0.5:
-            return {"final_decision": "WAIT", "confidence": 0.55, "votes": [], "reasoning": "Heuristic prefers more confirmation.", "disagreement": 0.2}
-        return {"final_decision": "SKIP", "confidence": 0.58, "votes": [], "reasoning": "Heuristic found insufficient edge.", "disagreement": 0.12}
-
-
 class GenLayerService:
+    """GenLayer-only decision service.
+
+    ``fallback_engine`` was removed by design: a failed/timeout GenLayer call
+    now yields ``status="error"`` with no decision instead of delegating to a
+    local model or heuristic rules.
+    """
+
     def __init__(
         self,
         enabled: bool | None = None,
         retries: int | None = None,
         timeout_seconds: float | None = None,
-        fallback_engine: LocalFallbackDecisionEngine | None = None,
     ) -> None:
         self.enabled = settings.genlayer_enabled if enabled is None else enabled
         self.retries = retries if retries is not None else settings.genlayer_max_retries
         self.timeout_seconds = timeout_seconds if timeout_seconds is not None else settings.genlayer_timeout_seconds
-        self.fallback_engine = fallback_engine or LocalFallbackDecisionEngine()
 
     def send_decision(self, payload: dict[str, Any]) -> dict[str, Any]:
         normalized_payload = normalize_trade_payload(payload)
         log_json(logger, logging.INFO, "decision_payload", payload=normalized_payload)
         if not self.enabled:
-            _debug_banner("[FALLBACK MODE] disabled")
+            _debug_banner("[GENLAYER DISABLED]")
             return {
                 "status": "disabled",
                 "reason": "GenLayer integration disabled via configuration.",
@@ -192,30 +131,26 @@ class GenLayerService:
                     token=normalized_payload.get("token"),
                 )
 
-        fallback_reason = "; ".join(errors) if errors else "unknown GenLayer failure"
-        fallback_result = self.fallback_engine.decide(normalized_payload, fallback_reason)
-        fallback_result["errors"] = errors
-        return fallback_result
+        # All retries exhausted: fail WITHOUT inventing a decision.
+        reason = "; ".join(errors) if errors else "unknown GenLayer failure"
+        log_json(
+            logger,
+            logging.ERROR,
+            "decision_unavailable",
+            token=normalized_payload.get("token"),
+            reason=reason,
+        )
+        return {
+            "status": "error",
+            "decision_source": "unavailable",
+            "reason": f"GenLayer unavailable, no fallback configured: {reason}",
+            "errors": errors,
+            "payload": normalized_payload,
+        }
 
 
 def send_decision(payload: dict[str, Any]) -> dict[str, Any]:
     return GenLayerService().send_decision(payload)
-
-
-def build_decision_prompt(payload: dict[str, Any]) -> str:
-    return (
-        "You are the Spider4AI fallback analyst. Return strict JSON with decision, confidence, reasoning.\n"
-        "Use BUY, WAIT, SKIP, or SCAM only.\n"
-        f"token: {payload.get('token', '')}\n"
-        f"summary: {payload.get('summary', '')}\n"
-        f"signal_strength: {payload.get('signal_strength')}\n"
-        f"risk_flags: {payload.get('risk_flags', [])}\n"
-        f"market_context: {payload.get('market_context', '')}\n"
-        f"recent_trend: {payload.get('recent_trend', '')}\n"
-        f"source: {payload.get('source', '')}\n"
-        f"tier: {payload.get('tier', '')}\n"
-        f"onchain_context: {payload.get('onchain_context', '')}\n"
-    )
 
 
 def normalize_trade_payload(payload: dict[str, Any]) -> dict[str, Any]:

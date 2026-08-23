@@ -40,11 +40,11 @@ Setiap siklus, bot:
 │  Action Log   │                      │ payload + onchain_context
 └───────▲───────┘                      ▼
         │ event_sink        ┌─────────────────────────┐   gagal?
-        │ (log real-time)   │    GenLayer Service     │────────────► Fallback
-        └───────────────────│  intelligent contract   │              local AI (Ollama)
-                            │  BULL·BEAR·NEUTRAL LLM  │────────────► heuristic lokal
-                            │  weighted voting on-chain│
-                            └────────────┬────────────┘
+        │ (log real-time)   │    GenLayer Service     │────────────► TANPA keputusan
+        └───────────────────│  intelligent contract   │              status "error"
+                            │  BULL·BEAR·NEUTRAL LLM  │              opportunity
+                            │  weighted voting on-chain│             dilewati
+                            └────────────┬────────────┘   (tanpa fallback AI)
                                          │ BUY @ confidence ≥ 0.7
                                          ▼
                             ┌─────────────────────────┐
@@ -72,7 +72,7 @@ Setiap siklus, bot:
 | `agents/` | Orkestrator pipeline utama (`SpiderAgent`) + event sink untuk UI |
 | `data/` | Client Cambrian API (cache, retry, budget log), narrative detector |
 | `engine/` | Rug checker, risk filter, scoring engine, confidence scorer, accumulation detector |
-| `genlayer/` | Client SDK Bradbury, service + fallback chain, source contract |
+| `genlayer/` | Client SDK Bradbury, service layer GenLayer-only (tanpa fallback), source contract + primitive konsensus reusable |
 | `execution/` | Trade manager (sizing/cooldown/breaker), exit strategies, Sepolia executor, DEX swap preview |
 | `storage/` | SQLite persistence (WAL mode, dedup latest-per-symbol) |
 | `web/` | Dashboard web FastAPI + HTML satu file |
@@ -134,9 +134,18 @@ Payload berisi symbol, summary, signal strength, risk flags, narrative, `onchain
 - **Konsensus:** tiap persona (BULL/BEAR/NEUTRAL) dievaluasi lewat Equivalence Principle (pola leader–validator jaringan); agregasi akhir = **weighted voting asimetris di level contract**: BEAR 1.35× > NEUTRAL 1.15× > BULL 1.0× (downside diberi bobot lebih besar sesuai risiko trading).
 - **Tie-break konservatif:** seri dimenangkan urutan `SCAM > SKIP > WAIT > BUY`.
 - **Fail-closed:** satu persona mengembalikan JSON invalid → seluruh evaluasi revert tanpa partial commit.
-- **Fallback berlapis:** GenLayer gagal/timeout → local AI (Ollama) → heuristic lokal. Banner debug: `[GENLAYER ACTIVE]` / `[FALLBACK MODE]`.
+- **GenLayer-only, tanpa fallback AI lokal (kebijakan desain):** jika GenLayer gagal/timeout setelah semua retry, siklus menghasilkan status `error` **tanpa keputusan** — opportunity ditandai `no_decision` dan dilewati. Bot tidak pernah memutuskan trade pakai model lokal atau heuristik. Banner debug: `[GENLAYER ACTIVE]` / `[GENLAYER DISABLED]`.
 
 Catatan teknis platform: GenVM storage butuh tipe khusus (`DynArray`, `u256`, `TreeMap`) dan calldata **tidak mendukung float** → semua I/O dikirim sebagai JSON string.
+
+#### Verifikasi live (Bradbury testnet)
+
+| Jalur | Hasil | Bukti |
+|---|---|---|
+| Keputusan on-chain (3 persona + weighted voting) | ✅ `WAIT @ 0.67`, disagreement 0.43 | tx `0xb5f72b1c...d551f1ad`, konsensus jaringan: 5 validator (3 AGREE), `FINISHED_WITH_RETURN` |
+| Pipeline penuh (payload → keputusan → eksekusi) | ✅ `deferred` untuk non-BUY | event log `[genlayer] E2E -> WAIT @ 0.57 (genlayer)` → `[exec] deferred` |
+| Guard DRY_RUN | ✅ transaksi disimulasikan, tanpa broadcast | `0xSIMULATED_...11155111` |
+| Degradasi saat API throttled | ✅ siklus dilewati tanpa crash | `[scan] Tidak ada data market dari Cambrian` |
 
 ### 5. Guardrail eksekusi
 
@@ -236,7 +245,6 @@ CAMBRIAN_LIQUIDITY_VOLUME_DIVISOR=5    # proxy liquidity = vol24h / divisor
 
 # === GenLayer ===
 SPIDER4AI_GENLAYER_TIMEOUT_SECONDS=150 # voting consensus butuh waktu (≥120 disarankan)
-SPIDER4AI_GENLAYER_FALLBACK_TIMEOUT_SECONDS=15
 SPIDER4AI_GENLAYER_MAX_RETRIES=3
 
 # === Eksekusi & risiko ===
@@ -315,7 +323,7 @@ py -3.13 main.py db-check         # 10 opportunity terakhir
 py -3.13 main.py cambrian-usage   # pemakaian & proyeksi budget
 py -3.13 main.py report           # generate report harian markdown
 py -3.13 main.py daily-report --schedule   # scheduler report 24 jam
-py -3.13 main.py genlayer-test    # dummy payload ke GenLayer/fallback
+py -3.13 main.py genlayer-test    # dummy payload ke GenLayer
 py -3.13 main.py testtrade --yes  # simulasi transaksi Sepolia
 py -3.13 main.py swap-test        # preview swap ETH->token (tanpa broadcast)
 py -3.13 main.py reset-db --yes   # hapus database lokal
@@ -345,7 +353,7 @@ SQLite tunggal (`spider4ai.db`, WAL mode + busy timeout 30s — aman diakses web
 py -3.13 -m pytest tests -q
 ```
 
-Suite mencakup: pipeline SpiderAgent (termasuk event sink & gerbang anti-rug), tier scoring, risk filter, RugChecker, payload & fallback GenLayer, confidence scorer, circuit breaker, report harian, dedup & migrasi kolom database.
+Suite mencakup: pipeline SpiderAgent (termasuk event sink & gerbang anti-rug), tier scoring, risk filter, RugChecker, payload GenLayer & kebijakan tanpa-fallback, confidence scorer, circuit breaker, report harian, dedup & migrasi kolom database.
 
 ---
 
@@ -368,7 +376,7 @@ Suite mencakup: pipeline SpiderAgent (termasuk event sink & gerbang anti-rug), t
 - **Belum ada eksekusi mainnet.** Executor saat ini adalah bridge transaksi testnet Sepolia.
 - Gunakan **wallet testnet** — jangan pernah isi private key wallet utama.
 - `.env` berisi secret dan sudah di-`.gitignore`.
-- Keputusan AI (on-chain maupun fallback) bukan nasihat keuangan. Memecoin adalah aset ekstrem risiko; gerbang anti-rug mengurangi — bukan menghilangkan — kemungkinan rug pull.
+- Keputusan AI on-chain bukan nasihat keuangan. Memecoin adalah aset ekstrem risiko; gerbang anti-rug mengurangi — bukan menghilangkan — kemungkinan rug pull.
 
 ## Lisensi
 

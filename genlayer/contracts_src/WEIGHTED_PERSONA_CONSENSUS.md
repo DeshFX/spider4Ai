@@ -6,6 +6,7 @@
 - Tested reference implementation: [`../consensus_logic.py`](../consensus_logic.py)
 - Target network: GenLayer Testnet **Bradbury** (chain id 4221)
 - Origin: extracted and generalized from the [Spider4AI](https://github.com/DeshFX/spider4Ai) trade-decision contract (deployed live: `0x54ba38e9D06cE4f99a3EA94A70101014C9ae261d`)
+- Status: **algorithm verified off-chain (87 unit tests); parent trade contract verified live on Bradbury; this primitive itself pending first deployment**
 
 ## Purpose
 
@@ -100,6 +101,19 @@ pytest tests/test_core.py::WeightedPersonaConsensusLogicTests -v
 ```
 
 Covers: config validation matrix, exact weighting math, conservative tie-break, disagreement downgrade + penalty, fail-closed normalization, optional signal/risk hooks, moderation preset validity. The reference module mirrors the contract algorithm line-for-line; both files carry sync notes.
+
+## Live evidence (parent contract)
+
+The generalized algorithm is the line-for-line superset of the already-deployed
+`SpiderTradeDecision` contract, which is verified live on Bradbury:
+
+- 3 personas (BULL/BEAR/NEUTRAL) each secured by the Equivalence Principle with full per-persona reasoning;
+- weighted aggregation `WAIT @ 0.67`, disagreement `0.43`;
+- network round: 5 validators — 3 AGREE, 1 DETERMINISTIC_VIOLATION, 1 TIMEOUT → result `AGREE`, status `ACCEPTED`, `FINISHED_WITH_RETURN`;
+- example tx: `0xb5f72b1cf0a94d7d0310c3d15cb6d9349a33da6aff1302d79fcd5683d551f1ad`.
+
+The primitive adds configurable personas/weights/labels on top of this proven
+flow; deploy once to obtain its own live address.
 
 ## Known limitations (documented trade-offs)
 

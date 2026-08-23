@@ -96,8 +96,6 @@ from engine.rug_checker import RugChecker
 from engine.scoring_engine import ScoringEngine
 from genlayer.service import (
     GenLayerService,
-    LocalFallbackDecisionEngine,
-    build_decision_prompt,
     normalize_decision_payload,
     normalize_trade_payload,
 )
@@ -198,13 +196,13 @@ class GenLayerTests(unittest.TestCase):
         normalized = normalize_decision_payload({"final_decision": "BUY", "confidence": 0.81, "votes": [], "reasoning": "Committee majority", "disagreement": 0.1})
         self.assertEqual(normalized["final_decision"], "BUY")
 
-    def test_fallback_used_after_retries(self) -> None:
-        fallback_engine = Mock(spec=LocalFallbackDecisionEngine)
-        fallback_engine.decide.return_value = {"status": "fallback", "decision_source": "heuristic", "decision": {"final_decision": "WAIT", "confidence": 0.5, "votes": [], "reasoning": "fallback", "disagreement": 0.2}}
-        service = GenLayerService(enabled=True, retries=2, timeout_seconds=0.01, fallback_engine=fallback_engine)
+    def test_no_fallback_after_retries_fails_without_decision(self) -> None:
+        service = GenLayerService(enabled=True, retries=2, timeout_seconds=0.01)
         with patch("genlayer.service.get_contract_at", side_effect=RuntimeError("boom")):
             result = service.send_decision({"symbol": "ABC", "risk_flags": []})
-        self.assertEqual(result["status"], "fallback")
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["decision_source"], "unavailable")
+        self.assertNotIn("decision", result)
         self.assertEqual(len(result["errors"]), 2)
 
 
@@ -289,38 +287,14 @@ class GenLayerTests(unittest.TestCase):
         self.assertEqual(normalized["final_decision"], "BUY")
         self.assertAlmostEqual(normalized["confidence"], 0.81)
 
-    def test_fallback_used_after_retries(self) -> None:
-        fallback_engine = Mock(spec=LocalFallbackDecisionEngine)
-        fallback_engine.decide.return_value = {
-            "status": "fallback",
-            "decision_source": "heuristic",
-            "decision": {
-                "final_decision": "WAIT",
-                "confidence": 0.5,
-                "votes": [],
-                "reasoning": "fallback",
-            },
-        }
-        service = GenLayerService(enabled=True, retries=2, timeout_seconds=0.01, fallback_engine=fallback_engine)
+    def test_no_fallback_after_retries_fails_without_decision(self) -> None:
+        service = GenLayerService(enabled=True, retries=2, timeout_seconds=0.01)
         with patch("genlayer.service.get_contract_at", side_effect=RuntimeError("boom")):
             result = service.send_decision({"symbol": "ABC", "risk_flags": []})
-        self.assertEqual(result["status"], "fallback")
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["decision_source"], "unavailable")
+        self.assertNotIn("decision", result)
         self.assertEqual(len(result["errors"]), 2)
-        fallback_engine.decide.assert_called_once()
-
-    def test_build_decision_prompt_includes_risk_and_summary(self) -> None:
-        prompt = build_decision_prompt(
-            {
-                "symbol": "ABC",
-                "summary": "Token summary",
-                "narrative": "AI",
-                "risk_flags": ["thin_liquidity"],
-                "source": "coingecko+dexscreener",
-            }
-        )
-        self.assertIn("Token summary", prompt)
-        self.assertIn("thin_liquidity", prompt)
-        self.assertIn("AI", prompt)
 
     def test_build_decision_payload_shapes_market_context(self) -> None:
         agent = SpiderAgent(decision_service=Mock())
@@ -882,13 +856,6 @@ class GenLayerOnchainTests(unittest.TestCase):
         )
         self.assertEqual(normalized["onchain_context"], "top holder 55%")
         self.assertEqual(normalized["tier"], "alpha")
-
-    def test_build_decision_prompt_includes_onchain(self) -> None:
-        prompt = build_decision_prompt(
-            {"token": "ABC", "onchain_context": "mint detected", "tier": "alpha"}
-        )
-        self.assertIn("mint detected", prompt)
-        self.assertIn("alpha", prompt)
 
 
 class CambrianUsageTests(unittest.TestCase):

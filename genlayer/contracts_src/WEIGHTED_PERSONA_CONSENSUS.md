@@ -115,6 +115,88 @@ The generalized algorithm is the line-for-line superset of the already-deployed
 The primitive adds configurable personas/weights/labels on top of this proven
 flow; deploy once to obtain its own live address.
 
+## Quickstart for external builders
+
+Three ways to use this primitive, depending on your role.
+
+### Way 1 — Deploy your own instance (most common)
+
+Copy the single contract file and deploy it with a config for YOUR domain:
+
+```python
+# pip install genlayer-py   (Python 3.13+ required)
+import json
+from genlayer_py import create_account, create_client
+from genlayer_py.chains import testnet_bradbury
+
+account = create_account("0x...")  # faucet: https://testnet-faucet.genlayer.foundation
+client = create_client(chain=testnet_bradbury, account=account)
+
+config = {
+    "personas": [
+        {"name": "FRAUD_AUDIT", "weight": 1.5,
+         "frame": "You are the FRAUD AUDITOR. Hunt for inconsistencies."},
+        {"name": "CLAIM_PROCESSOR", "weight": 1.0,
+         "frame": "You are the CLAIM PROCESSOR. Follow policy literally."},
+    ],
+    "labels": ["REJECT", "INVESTIGATE", "APPROVE"],  # index 0 = MOST conservative
+    "disagreement_fallback": "INVESTIGATE",
+    "disagreement_threshold": 0.5,
+}
+
+address = client.deploy_contract(
+    code=open("weighted_persona_consensus.py").read(),
+    account=account,
+    args=[json.dumps(config)],  # config is locked at deploy time
+)
+print(address)
+```
+
+### Way 2 — Call an existing instance (permissionless)
+
+Anyone may submit evaluations to any deployed instance and pay the gas:
+
+```python
+import json
+
+tx = client.write_contract(
+    address="0x<instance-address>",
+    function_name="evaluate",
+    account=account,
+    args=[json.dumps({
+        "subject": "ACME-INS-0042",   # required
+        "claim_amount": 12500,        # any extra keys are rendered into
+        "documents_verified": True,   # every persona prompt verbatim
+    })],
+    value=0,
+)
+client.wait_for_transaction_receipt(transaction_hash=tx, status=1)
+
+result = json.loads(client.read_contract(
+    address="0x<instance-address>", function_name="get_last_result"))
+# {"final_label": "INVESTIGATE", "confidence": 0.58, "disagreement": 0.52,
+#  "votes": [{"persona": "...", "label": "...", "reasoning": "..."}, ...]}
+```
+
+Other views: `get_recent_evaluations()`, `get_metrics()`, `get_config()`.
+
+### Way 3 — Reuse the pattern off-chain
+
+`../consensus_logic.py` is a pure-Python mirror (no SDK needed) of
+`parse_config` / `normalize_vote` / `aggregate_votes`. Import it to simulate
+or unit-test decision behavior before touching testnet - the tests in this
+repo (`WeightedPersonaConsensusLogicTests`) double as usage examples.
+
+### Semantics every caller must know
+
+| Behavior | Consequence for callers |
+|---|---|
+| Config immutable | 1 deployment = 1 configuration; changing personas/labels requires a new deploy |
+| Fail-closed | A malformed persona output reverts the tx; state untouched - retry safely |
+| Permissionless `evaluate` | Anyone can submit and pay gas; evaluation history is public |
+| Ring buffer `max_history` | Only the last N evaluations are retained |
+| Free-form payload keys | Adapt domains without redeploying - change payload contents instead |
+
 ## Known limitations (documented trade-offs)
 
 - History ring buffer keeps last N evaluations; full auditability would require events (GenVM event API not used in this version).

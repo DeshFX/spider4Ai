@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import shutil
 import sys
@@ -1289,3 +1290,162 @@ class NotificationTests(unittest.TestCase):
         self.assertIn("TAKE_PROFIT", text)
         self.assertIn("Ticker: AAA", text)
         self.assertIn("Amount: $50.00", text)
+
+
+class WeightedPersonaConsensusLogicTests(unittest.TestCase):
+    """Executable specification of the WeightedPersonaConsensus contract algorithm.
+
+    These tests run against genlayer/consensus_logic.py - the pure-Python
+    mirror of the aggregation logic inside
+    genlayer/contracts_src/weighted_persona_consensus.py.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from genlayer.consensus_logic import (
+            MODERATION_PRESET,
+            TRADING_PRESET,
+            aggregate_votes,
+            normalize_vote,
+            parse_config,
+        )
+
+        cls.preset = TRADING_PRESET
+        cls.moderation_preset = MODERATION_PRESET
+        cls.parse_config = staticmethod(parse_config)
+        cls.normalize_vote = staticmethod(normalize_vote)
+        cls.aggregate_votes = staticmethod(aggregate_votes)
+
+    def _votes(self, *triples):
+        weights = {"BULL_ANALYST": 1.0, "BEAR_ANALYST": 1.35, "NEUTRAL_ANALYST": 1.15}
+        return [
+            {
+                "persona": name,
+                "label": label,
+                "confidence": conf,
+                "reasoning": "r",
+                "weight": weights[name],
+            }
+            for name, label, conf in triples
+        ]
+
+    def test_trading_preset_valid_and_normalized(self):
+        config = self.parse_config(json.dumps(self.preset))
+        self.assertEqual(config["disagreement_threshold"], 0.45)
+        self.assertEqual(config["labels"][0], "SCAM")
+        self.assertEqual(len(config["personas"]), 3)
+
+    def test_config_rejection_matrix(self):
+        base = json.loads(json.dumps(self.preset))
+        cases = []
+        single = json.loads(json.dumps(base))
+        single["personas"] = single["personas"][:1]
+        cases.append(("one persona", single))
+        dup = json.loads(json.dumps(base))
+        dup["personas"][1]["name"] = dup["personas"][0]["name"]
+        cases.append(("duplicate persona name", dup))
+        heavy = json.loads(json.dumps(base))
+        heavy["personas"][0]["weight"] = 11
+        cases.append(("weight out of range", heavy))
+        noframe = json.loads(json.dumps(base))
+        noframe["personas"][0]["frame"] = ""
+        cases.append(("empty frame", noframe))
+        badfallback = json.loads(json.dumps(base))
+        badfallback["disagreement_fallback"] = "MAYBE"
+        cases.append(("fallback not a label", badfallback))
+        duplabels = json.loads(json.dumps(base))
+        duplabels["labels"] = ["BUY", "BUY"]
+        cases.append(("duplicate labels", duplabels))
+        badthreshold = json.loads(json.dumps(base))
+        badthreshold["disagreement_threshold"] = 1.5
+        cases.append(("threshold out of range", badthreshold))
+        for label, cfg in cases:
+            with self.subTest(case=label):
+                with self.assertRaises(ValueError):
+                    self.parse_config(json.dumps(cfg))
+
+    def test_weighting_math_exact_no_downgrade(self):
+        config = self.parse_config(json.dumps(self.preset))
+        votes = self._votes(
+            ("BULL_ANALYST", "BUY", 0.8),
+            ("BEAR_ANALYST", "BUY", 0.6),
+            ("NEUTRAL_ANALYST", "WAIT", 0.5),
+        )
+        result = self.aggregate_votes(config, {}, votes)
+        # BUY: 1.0*0.8 + 1.35*0.6 = 1.61 | WAIT: 1.15*0.5 = 0.575
+        self.assertAlmostEqual(result["disagreement"], 1 - 1.61 / 2.185, places=6)
+        self.assertLess(result["disagreement"], 0.45)
+        self.assertEqual(result["final_label"], "BUY")
+        self.assertAlmostEqual(result["confidence"], 2.185 / 3.5, places=6)
+
+    def test_tie_break_prefers_conservative_label(self):
+        config = self.parse_config(
+            json.dumps(
+                {
+                    "personas": [
+                        {"name": "A", "weight": 1.0, "frame": "f"},
+                        {"name": "B", "weight": 2.0, "frame": "g"},
+                    ],
+                    "labels": ["SCAM", "BUY"],
+                    "disagreement_fallback": "SCAM",
+                }
+            )
+        )
+        votes = [
+            {"persona": "A", "label": "BUY", "confidence": 0.8, "weight": 1.0},
+            {"persona": "B", "label": "SCAM", "confidence": 0.4, "weight": 2.0},
+        ]
+        result = self.aggregate_votes(config, {}, votes)
+        # Both scores are exactly 0.8 -> earlier (more conservative) label wins.
+        self.assertEqual(result["final_label"], "SCAM")
+
+    def test_disagreement_downgrades_to_fallback_with_penalty(self):
+        config = self.parse_config(json.dumps(self.preset))
+        votes = self._votes(
+            ("BULL_ANALYST", "BUY", 0.9),
+            ("BEAR_ANALYST", "SCAM", 0.7),
+            ("NEUTRAL_ANALYST", "WAIT", 0.5),
+        )
+        result = self.aggregate_votes(config, {}, votes)
+        # SCAM: 1.35*0.7 = 0.945 | BUY: 0.9 | WAIT: 0.575 ; sum 2.42
+        self.assertAlmostEqual(result["disagreement"], 1 - 0.945 / 2.42, places=6)
+        self.assertGreaterEqual(result["disagreement"], 0.45)
+        self.assertEqual(result["final_label"], "WAIT")
+        expected_conf = (2.42 / 3.5) * 0.75
+        self.assertAlmostEqual(result["confidence"], expected_conf, places=6)
+
+    def test_fail_closed_normalization_rejects_bad_votes(self):
+        config = self.parse_config(json.dumps(self.preset))
+        persona = config["personas"][0]
+        with self.assertRaises(ValueError):
+            self.normalize_vote(config, persona, {"label": "TO_THE_MOON", "confidence": 0.5})
+        with self.assertRaises(ValueError):
+            self.normalize_vote(config, persona, {"label": "BUY", "confidence": 1.5})
+        with self.assertRaises(ValueError):
+            self.normalize_vote(config, persona, "not a dict")
+
+    def test_optional_signal_blend_and_risk_penalty(self):
+        config = self.parse_config(json.dumps(self.preset))
+        votes = self._votes(
+            ("BULL_ANALYST", "BUY", 0.5),
+            ("BEAR_ANALYST", "BUY", 0.5),
+            ("NEUTRAL_ANALYST", "WAIT", 0.4),
+        )
+        payload = {"signal_strength": 0.8, "risk_flags": ["thin_liquidity", "new_token"]}
+        result = self.aggregate_votes(config, payload, votes)
+        ai_conf = 1.635 / 3.5
+        expected = ((ai_conf * 0.6) + (0.8 * 0.4)) - min(2 * 0.08, 0.4)
+        self.assertEqual(result["final_label"], "BUY")
+        self.assertAlmostEqual(result["confidence"], max(0.0, min(1.0, expected)), places=6)
+
+    def test_moderation_preset_is_valid(self):
+        config = self.parse_config(json.dumps(self.moderation_preset))
+        self.assertEqual(config["labels"][0], "BAN")
+        self.assertEqual(config["disagreement_fallback"], "FLAG")
+        votes = [
+            {"persona": "SAFETY_GUARD", "label": "ALLOW", "confidence": 0.6, "weight": 1.5},
+            {"persona": "CONTEXT_REVIEWER", "label": "BAN", "confidence": 0.6, "weight": 1.2},
+        ]
+        result = self.aggregate_votes(config, {}, votes)
+        # ALLOW 0.9 vs BAN 0.72 -> ALLOW wins, disagreement below threshold.
+        self.assertEqual(result["final_label"], "ALLOW")
